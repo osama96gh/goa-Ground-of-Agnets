@@ -1,0 +1,89 @@
+# Goa edge config. Single Caddy serves the dashboard SPA AND reverse-proxies
+# the hub at the same origin — no CORS, one TLS cert, one DNS record.
+#
+# GOA_DOMAIN comes from .env.deploy (e.g. `goa.example.com`). Caddy
+# auto-provisions a Let's Encrypt cert for public domains. For local /
+# private use, set GOA_DOMAIN=:443 to enable Caddy's internal CA, or
+# override with explicit `tls` directives.
+#
+# Path routing logic:
+#   /admin/*                 → hub  (dashboard-only API; never collides)
+#   /admin/stream            → hub  (SSE for dashboard; same buffering rules)
+#   /stream                  → hub  (SSE for agents/participants)
+#   /health                  → hub  (Caddy + LB healthchecks)
+#   /blobs/*                 → hub  (attachment download)
+#   /pending                 → hub  (pending-questions query)
+#
+#   /tasks*, /participants*  → CONTENT-NEGOTIATED. Both are dashboard SPA
+#                              client-routes (TasksPage, ParticipantsPage)
+#                              AND hub API paths (POST /tasks, GET
+#                              /participants, etc.). A browser hard-reload
+#                              sends `Accept: text/html…`; SDK clients send
+#                              `Accept: */*` or `application/json`. We split
+#                              on that header. Documented gotcha in DEPLOY.md.
+#
+#   /                        → dashboard SPA (index.html fallback)
+#   /assets/*, /favicon.ico  → dashboard static files
+
+{$GOA_DOMAIN} {
+    encode gzip zstd
+
+    # ─── Hub routes (no SPA collision) ────────────────────────────
+    handle /admin/stream {
+        # SSE-critical: no response buffering, long read timeout.
+        reverse_proxy hub:8000 {
+            flush_interval -1
+            transport http {
+                read_timeout 24h
+            }
+        }
+    }
+    handle /stream {
+        reverse_proxy hub:8000 {
+            flush_interval -1
+            transport http {
+                read_timeout 24h
+            }
+        }
+    }
+    # Plain `handle` (not `handle_path`) — the hub's admin router is
+    # mounted at /admin/*, so we keep the prefix intact on the upstream.
+    handle /admin/* {
+        reverse_proxy hub:8000
+    }
+    handle /health {
+        reverse_proxy hub:8000
+    }
+    handle /pending {
+        reverse_proxy hub:8000
+    }
+    handle /blobs/* {
+        reverse_proxy hub:8000
+    }
+
+    # ─── Content-negotiated split for paths that collide ─────────
+    # /tasks and /participants are both hub API paths AND dashboard SPA
+    # client-routes. We disambiguate by Accept header:
+    #   GET + Accept: text/html  →  serve the SPA (browser hard-reload)
+    #   anything else            →  proxy to hub API (SDK clients)
+    @collision_paths path /tasks /tasks/* /participants /participants/*
+    @spa_html {
+        method GET
+        header Accept *text/html*
+    }
+    handle @collision_paths {
+        handle @spa_html {
+            root * /srv/dashboard
+            try_files {path} /index.html
+            file_server
+        }
+        reverse_proxy hub:8000
+    }
+
+    # ─── Dashboard static assets and SPA fallback ────────────────
+    handle {
+        root * /srv/dashboard
+        try_files {path} /index.html
+        file_server
+    }
+}

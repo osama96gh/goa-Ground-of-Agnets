@@ -62,6 +62,17 @@ make dashboard-build # production static bundle in goa-dashboard/dist/
 make help            # full target list
 ```
 
+## Deploying for real
+
+For self-hosting Goa on a VM with HTTPS, an external Postgres or
+Supabase, and the dashboard at your own domain — see **[DEPLOY.md](DEPLOY.md)**.
+The short version:
+
+```sh
+cp .env.deploy.example .env.deploy && $EDITOR .env.deploy
+make deploy        # docker compose up -d with safety checks
+```
+
 ## Documentation
 
 - **[specs/goa.md](specs/goa.md)** — concepts, invariants, wire shape. Start here.

@@ -1,0 +1,99 @@
+# Goa deployment — Tier 1 (self-host via Docker Compose).
+#
+# Three always-on services (web, hub) and one profile-gated service
+# (postgres). The `bundled-db` profile is opt-in so users with an external
+# Postgres (Supabase / Neon / RDS) don't run a local DB they don't need.
+#
+# Usage
+# -----
+#   With bundled Postgres:
+#     docker compose --env-file .env.deploy --profile bundled-db up -d
+#
+#   With external Postgres (set GOA_DATABASE_URL in .env.deploy):
+#     docker compose --env-file .env.deploy up -d
+#
+# See DEPLOY.md for the full operator's guide and the Supabase
+# port-5432-not-6543 callout.
+
+services:
+
+  # Public-facing edge: TLS termination, dashboard SPA, hub reverse proxy.
+  # Built from goa-dashboard/Dockerfile — the image bakes in the SPA's
+  # static dist/; the Caddyfile is bind-mounted so operators can edit
+  # routing without rebuilding.
+  web:
+    build:
+      context: ./goa-dashboard
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"            # HTTP/3 (QUIC). Harmless on hosts without UDP forwarding.
+    environment:
+      GOA_DOMAIN: ${GOA_DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data         # Let's Encrypt cert storage. KEEP this volume.
+      - caddy-config:/config
+    depends_on:
+      hub:
+        condition: service_healthy
+
+  # Hub: the FastAPI app. Always-on. State lives in either the bundled
+  # Postgres (with the `bundled-db` profile) or whatever GOA_DATABASE_URL
+  # points at.
+  hub:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      # Required
+      GOA_SERVER_PEPPER: ${GOA_SERVER_PEPPER:?GOA_SERVER_PEPPER must be set}
+      GOA_ADMIN_TOKEN:   ${GOA_ADMIN_TOKEN:?GOA_ADMIN_TOKEN must be set}
+      GOA_DATABASE_URL:  ${GOA_DATABASE_URL:?GOA_DATABASE_URL must be set}
+      # Optional — empty by default. CORS isn't needed in the canonical
+      # same-origin deploy; populate if you serve the dashboard from a
+      # different origin than the hub.
+      GOA_CORS_ORIGINS:    ${GOA_CORS_ORIGINS:-}
+      # Blob backend. Default `db` keeps bytes in Postgres; switch to `s3`
+      # for any S3-compatible store (R2, Supabase Storage, MinIO).
+      GOA_BLOB_BACKEND:    ${GOA_BLOB_BACKEND:-db}
+      GOA_BLOB_ENDPOINT:   ${GOA_BLOB_ENDPOINT:-}
+      GOA_BLOB_BUCKET:     ${GOA_BLOB_BUCKET:-}
+      GOA_BLOB_REGION:     ${GOA_BLOB_REGION:-}
+      GOA_BLOB_ACCESS_KEY: ${GOA_BLOB_ACCESS_KEY:-}
+      GOA_BLOB_SECRET_KEY: ${GOA_BLOB_SECRET_KEY:-}
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O-", "http://127.0.0.1:8000/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 20s
+
+  # Bundled Postgres — opt-in via `--profile bundled-db`. Skip this if you
+  # already have Postgres elsewhere; just point GOA_DATABASE_URL at it.
+  postgres:
+    image: postgres:16-alpine
+    profiles: ["bundled-db"]
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-goa}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-goa}
+      POSTGRES_DB: ${POSTGRES_DB:-goa}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-goa} -d ${POSTGRES_DB:-goa}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  # Persists Let's Encrypt account + certs. Do NOT delete on `compose down`;
+  # losing this triggers cert re-issuance and you may hit rate limits.
+  caddy-data: {}
+  caddy-config: {}
+  # Bundled Postgres data dir. Only used when --profile bundled-db is active.
+  pgdata: {}

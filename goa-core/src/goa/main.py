@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from uuid import UUID
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from goa.api.admin import router as admin_router
 from goa.api.blobs import router as blobs_router
@@ -16,6 +18,12 @@ from goa.deps import build_context
 from goa.errors import install_error_handlers
 from goa.repos.persistence import Persistence
 from goa.stream.hub import StreamHub
+
+# Sentinel ID for the health-check probe: a random UUID that will never match
+# a real participant, so `get(_HEALTH_PROBE_ID)` returns None on success and
+# raises if the backing store is unreachable. Cheap (one indexed lookup) and
+# touches the actual DB connection — not just the process.
+_HEALTH_PROBE_ID = UUID("00000000-0000-0000-0000-000000000000")
 
 
 def create_app(
@@ -71,6 +79,22 @@ def create_app(
         )
 
     install_error_handlers(app)
+
+    @app.get("/health", include_in_schema=False)
+    async def health() -> JSONResponse:
+        """Liveness + readiness probe. No auth — load balancers and Compose
+        healthchecks can't carry the admin token. Returns 200 when the
+        persistence layer answers, 503 otherwise. The probe is a single
+        indexed lookup on a sentinel UUID that will never match a real row.
+        """
+        try:
+            await ctx.participant_store.get(_HEALTH_PROBE_ID)
+        except Exception as exc:  # noqa: BLE001 — any failure means degraded
+            return JSONResponse(
+                status_code=503,
+                content={"status": "degraded", "detail": str(exc)[:200]},
+            )
+        return JSONResponse(status_code=200, content={"status": "ok"})
 
     app.include_router(participants_router)
     app.include_router(tasks_router)
