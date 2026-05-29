@@ -1,11 +1,12 @@
 """Register the demo agents once and write per-example .env files.
 
 Idempotent: if `examples/<name>/.env` already has GOA_API_KEY +
-GOA_PARTICIPANT_ID, that agent is skipped. Re-run after `make demo-clean`
-(which wipes goa.db AND the per-example .env files) to get a fresh set.
+GOA_PARTICIPANT_ID *and the hub recognizes those creds*, that agent is
+skipped. Cached creds against a different hub (e.g. you ran
+`make demo` then pointed at `make up`, which uses a separate Postgres)
+are detected and re-registered automatically — no manual cleanup needed.
 
-Requires `make goa` running in another terminal — this script does not
-boot a hub of its own.
+Re-run after `make demo-clean` to wipe everything and get a fresh set.
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from uuid import UUID
 
 import httpx
 
@@ -22,6 +24,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 EXAMPLES_DIR = REPO_ROOT / "examples"
 
 from goa_sdk import Goa  # noqa: E402
+from goa_sdk.errors import GoaSdkError  # noqa: E402
 
 
 @dataclass(frozen=True)
@@ -101,6 +104,27 @@ async def _check_hub(base_url: str) -> None:
         sys.exit(1)
 
 
+async def _creds_recognized(base_url: str, api_key: str, participant_id: str) -> bool:
+    """Probe the hub with the cached creds: does this participant still exist
+    here and does this api_key still authenticate? Returns False on 401
+    (key invalid — wrong hub / rotated pepper) or 404 (DB wiped). Treats
+    other server errors as "stale" too, so we re-register rather than skip
+    silently. Network errors propagate — `_check_hub` already ruled those
+    out, so a fresh failure here is genuinely unexpected."""
+    try:
+        pid = UUID(participant_id)
+    except ValueError:
+        return False
+    client = Goa(api_key, base_url)
+    try:
+        await client.get_participant(pid)
+        return True
+    except GoaSdkError:
+        return False
+    finally:
+        await client.aclose()
+
+
 async def _register(base_url: str, agent: AgentSpec) -> tuple[str, str]:
     client, api_key, participant = await Goa.register_participant(
         base_url,
@@ -124,18 +148,24 @@ async def main() -> None:
         env_path = EXAMPLES_DIR / agent.dir_name / ".env"
         existing = _existing_creds(env_path)
         if existing is not None:
-            print(f"[{agent.name}] already registered ({existing[1]}); skipping")
-            continue
+            cached_key, cached_id = existing
+            if await _creds_recognized(base_url, cached_key, cached_id):
+                print(f"[{agent.name}] already registered ({cached_id}); skipping")
+                continue
+            # Cached creds don't match this hub — could be a different DB
+            # (you switched between `make demo` and `make up`) or the hub
+            # was wiped. Re-register and overwrite the stale file.
+            print(f"[{agent.name}] cached creds rejected by hub → re-registering")
         api_key, participant_id = await _register(base_url, agent)
         _write_env(env_path, agent, api_key, participant_id)
         print(f"[{agent.name}] registered {participant_id} → {env_path.relative_to(REPO_ROOT)}")
         any_registered = True
 
     if not any_registered:
-        print("\nAll agents already registered. Delete the .env files or run "
-              "`make demo-clean` to start fresh.")
+        print("\nAll agents already registered against this hub. "
+              "Run `make demo-clean` to start fresh.")
     else:
-        print("\nDone. Stop `make goa` and run `make demo`.")
+        print("\nDone.")
 
 
 if __name__ == "__main__":

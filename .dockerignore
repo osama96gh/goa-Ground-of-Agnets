@@ -1,0 +1,47 @@
+# Keep Docker build context lean. Anything not needed by the Dockerfiles
+# stays out — speeds up `docker build` and avoids leaking dev artifacts
+# (secrets, local DB files, IDE state) into images.
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+
+# Node / dashboard
+node_modules/
+goa-dashboard/node_modules/
+goa-dashboard/dist/
+goa-dashboard/*.tsbuildinfo
+
+# Local state
+*.db
+*.db-wal
+*.db-shm
+goa.db*
+
+# Env files — production deploys mount secrets from `.env.deploy` or via
+# the platform's secret system; nothing env-shaped belongs in the image.
+.env
+.env.*
+!.env.example
+!.env.deploy.example
+examples/*/.env
+
+# VCS / tooling
+.git/
+.github/
+.gitignore
+.DS_Store
+
+# Docs and plans — not needed at runtime
+specs/
+.claude/
+
+# Honcho / dev orchestration — runtime image runs uvicorn directly
+Procfile
+scripts/bootstrap-env.sh

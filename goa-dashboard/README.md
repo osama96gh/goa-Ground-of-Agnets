@@ -2,8 +2,13 @@
 
 Read-only observability dashboard for a running Goa hub. Shows the live event
 firehose, the participant directory, and per-task event logs. **No write
-surface** — task creation and event composition happen via the SDK or
-[examples/](../examples) scripts, not the dashboard.
+surface** — task creation and event composition happen via the HTTP API
+(directly with curl, or via the [Python SDK](../goa-sdk); see
+[examples/](../examples) for both).
+
+The dashboard itself is a non-SDK HTTP client
+([`src/api/client.ts`](src/api/client.ts)) — same hub, just `fetch()`.
+Same wire shape any other language gets from [`openapi.json`](../openapi.json).
 
 ## Running it
 
@@ -39,10 +44,12 @@ proxy in [vite.config.ts](vite.config.ts)).
 
 ## What's not in this dashboard
 
-- Posting events (questions, answers, info) — use the SDK.
-- Creating tasks or sub-tasks — use the SDK.
-- Registering participants from the UI — use `POST /participants` directly
-  or the [examples](../examples) which all self-register.
+- Posting events (questions, answers, info) — use the HTTP API
+  (directly, or via the Python SDK).
+- Creating tasks or sub-tasks — use the HTTP API
+  (directly, or via the Python SDK).
+- Registering participants from the UI — `POST /participants` directly
+  or run the [examples](../examples), which all self-register.
 
 These were intentionally cut from the dashboard's scope to keep it small and
 focused on "see what's happening." See [specs/goa.md](../specs/goa.md) §13 for

@@ -13,6 +13,7 @@
 #   /health                  → hub  (Caddy + LB healthchecks)
 #   /blobs/*                 → hub  (attachment download)
 #   /pending                 → hub  (pending-questions query)
+#   /openapi.json            → hub  (public API contract; codegen consumes this)
 #
 #   /tasks*, /participants*  → CONTENT-NEGOTIATED. Both are dashboard SPA
 #                              client-routes (TasksPage, ParticipantsPage)
@@ -58,6 +59,14 @@
         reverse_proxy hub:8000
     }
     handle /blobs/* {
+        reverse_proxy hub:8000
+    }
+    # /openapi.json — the public API contract, served live by the hub.
+    # Unauthenticated by design: the spec is the contract, not a secret;
+    # gating it would break codegen for external integrators with zero
+    # security gain. /docs (Swagger UI) is intentionally NOT routed —
+    # the JSON spec covers the machine-readable need without a UI commitment.
+    handle /openapi.json {
         reverse_proxy hub:8000
     }
 

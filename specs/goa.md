@@ -77,7 +77,7 @@ A developer can:
 Properties:
 
 - **Participants are clients of Goa, never servers.** No public endpoint required. All cross-participant traffic routes through Goa.
-- **Inbound is async over SSE.** Outbound (create task, append event, upsert) is plain HTTP POST.
+- **Inbound is async over SSE.** Outbound (create task, append event, upsert) is plain HTTP POST. For endpoint paths, payload shapes, and error envelopes see [`openapi.json`](../openapi.json) at the repo root.
 - **Goa is the only place that holds task state.** Participants hold no shared state with each other.
 - **Privacy is achieved through task boundaries, not per-event scopes.** Within a task, every event is visible to every participant. Cross-task visibility is gated by participation. To carve out a private exchange, spawn a sub-task.
 - **Pending state is materialized.** "Who owes a reply" is a stored list, not a derived query. The event log remains the canonical source of truth and the list is rebuildable from it.

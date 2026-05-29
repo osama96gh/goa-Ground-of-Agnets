@@ -1,5 +1,30 @@
 # Goa v2 reference examples
 
+## Same flow, three ways
+
+Goa is HTTP API-first — the Python SDK is one consumer, and the dashboard
+is another. The same conversation ("chat-service asks support, support
+spawns a private sub-task to payments on `refund`, support answers")
+shows up here in three forms:
+
+- **Python SDK** — [`chat-service/`](chat-service/),
+  [`support-agent/`](support-agent/), [`payments-agent/`](payments-agent/).
+  Three Pythonic agents using [`goa_sdk`](../goa-sdk).
+- **Raw HTTP / curl** — [`http/`](http/). Five small shell scripts that
+  reproduce the chat-service half of the flow over the wire. Read these
+  to learn the request/response shapes without going through Python.
+- **Browser** — the dashboard at <http://localhost:5173> during
+  `make demo`. A non-SDK TypeScript consumer of the same hub
+  (see [`goa-dashboard/src/api/client.ts`](../goa-dashboard/src/api/client.ts)).
+
+The committed [`openapi.json`](../openapi.json) is the machine-readable
+contract these three converge on. Feed it to `openapi-generator-cli` for a
+client in your language of choice.
+
+---
+
+## Reference participants (Python SDK)
+
 Three participants that demonstrate the v2 contract end-to-end:
 
 - [`chat-service/`](chat-service/) — service participant fronting a chat.
@@ -28,9 +53,8 @@ participants, and the dashboard with interleaved logs in a single
 terminal:
 
 ```sh
-cp .env.example .env   # one-time: provides GOA_SERVER_PEPPER, GOA_ADMIN_TOKEN
 make install           # one-time
-make demo
+make demo              # bootstraps .env.local on first run, then starts everything
 ```
 
 - Chat UI: <http://127.0.0.1:8002> — type or pick a thread, send a
@@ -46,16 +70,19 @@ One Ctrl-C in the `make demo` terminal stops everything.
 
 ### State persistence
 
-By default `make demo` runs with `GOA_DATABASE_URL=sqlite:./goa.db`
-(from `.env.example`), so hub state lives in a local SQLite file and
+By default `make demo` runs with Postgres in a local container
+(`GOA_DATABASE_URL=postgresql://goa:goa@localhost:5432/goa`, from
+`.env.local.example`), so hub state lives in a docker volume and
 **persists across `make demo` runs**: Ctrl-C, re-run `make demo`, and
 your chat thread, events, and pending questions are still there.
 
 When you want a clean slate, run `make demo-clean` first — it removes
-`./goa.db` (plus its `-wal` / `-shm` sidecars) and is a no-op when the
-DSN isn't `sqlite:<path>`.
+the data volumes (Postgres + MinIO blobs) and the per-example `.env`
+files so the next `make demo` re-registers everything fresh.
 
-Set `GOA_DATABASE_URL=` (empty) in `.env` to revert to in-memory.
+To use SQLite or in-memory instead, edit `.env.local` and uncomment one
+of the alternative `GOA_DATABASE_URL=` lines — comments inline explain
+the tradeoffs.
 
 ## Scripted smoke test
 

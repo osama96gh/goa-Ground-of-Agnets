@@ -19,34 +19,46 @@ workflow (`make demo`).
 
 ```sh
 git clone <repo-url> goa && cd goa
-cp .env.deploy.example .env.deploy
-$EDITOR .env.deploy                   # fill in GOA_DOMAIN, secrets, DB URL
-make deploy                           # docker compose up -d, with safety checks
+make bootstrap-env                    # creates .env.local + .env.docker from templates
+$EDITOR .env.docker                   # fill in GOA_DOMAIN, secrets, blob creds
+make up                               # docker compose up -d, with safety checks
 ```
 
-`make deploy` rejects placeholder secrets and missing required vars, then
-runs Compose with the `bundled-db` profile by default. To use an external
-Postgres instead, set `GOA_DATABASE_URL` to an external host in
-`.env.deploy` and run `EXTERNAL_DB=1 make deploy`.
+`make up` warns on placeholder secrets and missing required vars, then
+runs Compose. The dockerized stack reads **only** `.env.docker` — a
+complete, self-contained env file. The other file, `.env.local`, is the
+equivalent for `make demo` (native hub on the host); the two files don't
+overlay or share, by design. See [README.md](README.md) for the local-dev
+workflow.
+
+The bundled Postgres service always runs as part of the stack; to use an
+external Postgres instead, set `GOA_DATABASE_URL` to an external host in
+`.env.docker`, then run `EXTERNAL_DB=1 make up` to stop the bundled
+service.
 
 Once it's up, your domain serves:
 
+**The HTTP API is the primary surface.** The dashboard and the Python SDK
+are both clients of it; other languages can codegen from
+`https://<domain>/openapi.json` (or the [committed `openapi.json`](openapi.json)).
+
 | Path | What it is |
 | --- | --- |
-| `https://<domain>/` | Dashboard (prompts for `GOA_ADMIN_TOKEN` on first load) |
-| `https://<domain>/admin/*` | Admin API (token-gated; the dashboard uses this) |
-| `https://<domain>/stream` | SSE endpoint for participants (SDK clients) |
 | `https://<domain>/tasks`, `/participants`, `/blobs/*`, `/pending` | Public hub API (Bearer-auth with participant API keys) |
+| `https://<domain>/stream` | SSE endpoint for participants (any HTTP client; the SDK is one) |
+| `https://<domain>/openapi.json` | Public API contract — machine-readable schema for codegen |
+| `https://<domain>/admin/*` | Admin API (token-gated; the dashboard uses this) |
+| `https://<domain>/` | Dashboard (prompts for `GOA_ADMIN_TOKEN` on first load) |
 | `https://<domain>/health` | Liveness/readiness probe (returns 200/503) |
 
 ## Picking your Postgres
 
-| Backend | Use when | URL shape | Compose profile |
+| Backend | Use when | URL shape | Notes |
 | --- | --- | --- | --- |
-| **Bundled** | First deploy, want zero external accounts | `postgresql://goa:goa@postgres:5432/goa` | `--profile bundled-db` |
-| **Supabase** | Already on Supabase | `postgresql://postgres.<ref>:<pwd>@aws-0-<region>.pooler.supabase.com:5432/postgres` | *(none)* |
-| **Neon** | Want serverless Postgres | `postgresql://user:pass@ep-xxx.<region>.neon.tech/goa?sslmode=require` | *(none)* |
-| **AWS RDS / self-hosted** | Bring your own | `postgresql://user:pass@host:5432/goa` | *(none)* |
+| **Bundled** | First deploy, want zero external accounts | `postgresql://goa:goa@postgres:5432/goa` | Always runs by default. |
+| **Supabase** | Already on Supabase | `postgresql://postgres.<ref>:<pwd>@aws-0-<region>.pooler.supabase.com:5432/postgres` | Use `EXTERNAL_DB=1` to stop the bundled service. |
+| **Neon** | Want serverless Postgres | `postgresql://user:pass@ep-xxx.<region>.neon.tech/goa?sslmode=require` | Use `EXTERNAL_DB=1` to stop the bundled service. |
+| **AWS RDS / self-hosted** | Bring your own | `postgresql://user:pass@host:5432/goa` | Use `EXTERNAL_DB=1` to stop the bundled service. |
 
 > **⚠ Supabase users: use port 5432, NOT 6543.**
 > The pooler URL shown in the "Transaction" tab of the Supabase dashboard
@@ -58,31 +70,34 @@ Once it's up, your domain serves:
 The same rule applies to PgBouncer in transaction mode — Goa needs a
 session-mode connection.
 
-## Picking your blob backend (optional)
+## Picking your blob backend
 
-By default, attachments live in Postgres as `bytea` rows. That's fine until
-your users attach files in bulk — large blobs in Postgres bloat the
-table and slow down everything else.
+Postgres holds no blob bytes in this design — bytes go to an S3-compatible
+store. With any Postgres `GOA_DATABASE_URL` you **must** set
+`GOA_BLOB_BACKEND=s3` and fill in the five S3 fields; the hub refuses to
+start otherwise.
 
-To route blobs to any S3-compatible store, set:
+The default `.env.docker` points at the **bundled MinIO** service in
+`docker-compose.yml`, so `docker compose up` works offline out of the box.
+A one-shot `minio-init` container creates the configured bucket
+(idempotent) before the hub starts; the hub waits on
+`service_completed_successfully` to avoid race conditions on first start.
+
+To swap to a managed store, change `GOA_BLOB_ENDPOINT` (and the
+credentials) in `.env.docker`, then stop the bundled MinIO:
 
 ```sh
-GOA_BLOB_BACKEND=s3
-GOA_BLOB_ENDPOINT=...
-GOA_BLOB_BUCKET=...
-GOA_BLOB_REGION=...
-GOA_BLOB_ACCESS_KEY=...
-GOA_BLOB_SECRET_KEY=...
+docker compose --env-file .env.docker up --scale minio=0 --scale minio-init=0
 ```
 
 Tested with:
 
 | Provider | `GOA_BLOB_ENDPOINT` |
 | --- | --- |
+| Bundled MinIO | `http://localhost:9000` (native) / `http://minio:9000` (in-Docker) |
 | AWS S3 | `https://s3.<region>.amazonaws.com` |
 | Cloudflare R2 | `https://<account-id>.r2.cloudflarestorage.com` |
 | Supabase Storage | `https://<project-ref>.storage.supabase.co/storage/v1/s3` |
-| MinIO | `https://<your-minio>/` |
 | Backblaze B2 | `https://s3.<region>.backblazeb2.com` |
 
 Metadata (filename, MIME type, size, task association) stays in Postgres —
@@ -91,16 +106,16 @@ only the bytes move to S3.
 ## Common operations
 
 ```sh
-make deploy           # up -d, with safety checks
-make deploy-down      # stop the stack (data volumes preserved)
-make deploy-logs      # tail logs from all services
-make deploy-update    # rebuild and recreate only changed containers
+make up           # bring up the stack (with safety checks)
+make down         # stop the stack (data volumes preserved)
+make logs         # tail logs from all services
+make update       # pull/rebuild images and recreate changed containers
 ```
 
 To wipe and start fresh (destructive — kills bundled Postgres data):
 
 ```sh
-docker compose --env-file .env.deploy --profile bundled-db down -v
+docker compose --env-file .env.docker down -v
 ```
 
 ## Known limitations
@@ -136,11 +151,14 @@ These are real constraints in this release — please don't be surprised.
        │   └─ /tasks /participants → content-negotiated   │
        │                                                  │
        │   hub   :8000 (FastAPI / uvicorn)                │
-       │   │                                              │
-       │   ▼                                              │
-       │   postgres :5432 (bundled, optional profile)     │
-       │   OR                                             │
-       │   → external Postgres (Supabase / Neon / RDS)    │
+       │   │ ├─ task / participant / event reads + writes │
+       │   ▼ ▼                                            │
+       │   postgres :5432   minio :9000                   │
+       │   (metadata)       (blob bytes)                  │
+       │                                                  │
+       │   Both bundled and always-on by default. Point   │
+       │   at managed alternatives in .env.docker and use │
+       │   --scale to stop the bundled ones.              │
        │                                                  │
        └──────────────────────────────────────────────────┘
 ```
@@ -151,8 +169,8 @@ The whole stack is three (or four) containers. Caddy is the single edge.
 
 To rotate `GOA_ADMIN_TOKEN`:
 
-1. Edit `.env.deploy`, set the new value.
-2. `docker compose --env-file .env.deploy --profile bundled-db up -d hub`
+1. Edit `.env.docker`, set the new value.
+2. `docker compose --env-file .env.docker up -d hub`
    (recreates only the hub container).
 3. Reload the dashboard in your browser; it'll prompt for the new token.
 
