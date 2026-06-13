@@ -44,7 +44,7 @@ are both clients of it; other languages can codegen from
 
 | Path | What it is |
 | --- | --- |
-| `https://<domain>/tasks`, `/participants`, `/blobs/*`, `/pending` | Public hub API (Bearer-auth with participant API keys) |
+| `https://<domain>/tasks`, `/participants`, `/memory`, `/blobs/*`, `/pending` | Public hub API (Bearer-auth with participant API keys) |
 | `https://<domain>/stream` | SSE endpoint for participants (any HTTP client; the SDK is one) |
 | `https://<domain>/openapi.json` | Public API contract — machine-readable schema for codegen |
 | `https://<domain>/admin/*` | Admin API (token-gated; the dashboard uses this) |
@@ -132,7 +132,7 @@ These are real constraints in this release — please don't be surprised.
 - **Schema applies on first connect; no migration tool.** `PostgresAdapter`
   runs `CREATE TABLE IF NOT EXISTS` on startup. Downgrades and manual
   schema edits are not first-class.
-- **Dashboard SPA / hub API path collision.** `/tasks` and `/participants`
+- **Dashboard SPA / hub API path collision.** `/tasks`, `/participants`, and `/memory`
   are both dashboard client-routes and hub API endpoints. The Caddyfile
   resolves this by content-negotiation: `Accept: text/html` → SPA,
   anything else → API. This works for all real-world clients (browsers
@@ -148,7 +148,7 @@ These are real constraints in this release — please don't be surprised.
        │   ├─ TLS via Let's Encrypt (auto)                │
        │   ├─ Dashboard SPA at /  (static, from image)    │
        │   ├─ /admin/* /stream /health → hub:8000         │
-       │   └─ /tasks /participants → content-negotiated   │
+       │   └─ /tasks /participants /memory → negotiated   │
        │                                                  │
        │   hub   :8000 (FastAPI / uvicorn)                │
        │   │ ├─ task / participant / event reads + writes │

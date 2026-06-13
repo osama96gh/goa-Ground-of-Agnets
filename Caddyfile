@@ -16,11 +16,13 @@
 #   /openapi.json            → hub  (public API contract; codegen consumes this)
 #   /docs, /redoc            → hub  (Swagger UI / ReDoc; human-browseable API)
 #
-#   /tasks*, /participants*  → CONTENT-NEGOTIATED. Both are dashboard SPA
-#                              client-routes (TasksPage, ParticipantsPage)
-#                              AND hub API paths (POST /tasks, GET
-#                              /participants, etc.). A browser hard-reload
-#                              sends `Accept: text/html…`; SDK clients send
+#   /tasks*, /participants*,
+#   /memory*                 → CONTENT-NEGOTIATED. These are dashboard SPA
+#                              client-routes (TasksPage, ParticipantsPage,
+#                              MemoryPage) AND hub API paths (POST /tasks,
+#                              GET /participants, GET/POST/DELETE /memory,
+#                              etc.). A browser hard-reload sends
+#                              `Accept: text/html…`; SDK clients send
 #                              `Accept: */*` or `application/json`. We split
 #                              on that header. Documented gotcha in DEPLOY.md.
 #
@@ -82,11 +84,11 @@
     }
 
     # ─── Content-negotiated split for paths that collide ─────────
-    # /tasks and /participants are both hub API paths AND dashboard SPA
+    # /tasks, /participants, and /memory are both hub API paths AND dashboard SPA
     # client-routes. We disambiguate by Accept header:
     #   GET + Accept: text/html  →  serve the SPA (browser hard-reload)
     #   anything else            →  proxy to hub API (SDK clients)
-    @collision_paths path /tasks /tasks/* /participants /participants/*
+    @collision_paths path /tasks /tasks/* /participants /participants/* /memory /memory/*
     @spa_html {
         method GET
         header Accept *text/html*
