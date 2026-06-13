@@ -10,6 +10,10 @@ export interface FirehoseHandlers {
   onEvent: (frame: StreamEventFrame, lastEventId: string | null) => void;
   onGap: (gap: StreamGapData) => void;
   onError?: (err: unknown) => void;
+  // Fired when the SSE connection (re)opens — first connect and every reconnect.
+  onOpen?: () => void;
+  // Fired when fetchEventSource drops and is about to retry (exponential backoff).
+  onReconnecting?: () => void;
 }
 
 export interface FirehoseHandle {
@@ -34,6 +38,14 @@ export function streamFirehose(handlers: FirehoseHandlers): FirehoseHandle {
       // server-emitted ids, so explicit header here would just duplicate.
     },
     openWhenHidden: true,
+    onopen: async (res) => {
+      if (res.ok) {
+        handlers.onOpen?.();
+        return;
+      }
+      // Non-2xx on open — surface as an error and let backoff retry.
+      handlers.onError?.(new Error(`firehose open failed: ${res.status}`));
+    },
     onmessage(msg) {
       lastEventId = msg.id || lastEventId;
       try {
@@ -48,8 +60,13 @@ export function streamFirehose(handlers: FirehoseHandlers): FirehoseHandle {
         handlers.onError?.(err);
       }
     },
+    onclose() {
+      // Server closed the stream; fetchEventSource will retry. Treat as reconnecting.
+      handlers.onReconnecting?.();
+    },
     onerror(err) {
       handlers.onError?.(err);
+      handlers.onReconnecting?.();
       // Re-throw to keep fetchEventSource's default exponential backoff;
       // returning would kill the connection.
       throw err;

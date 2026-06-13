@@ -3,6 +3,9 @@ import { Route, Routes } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { AdminTokenGate } from "./components/AdminTokenGate";
 import { Layout } from "./components/Layout";
+import { CommandPalette } from "./components/CommandPalette";
+import { MemoryPage } from "./routes/MemoryPage";
+import { OverviewPage } from "./routes/OverviewPage";
 import { ParticipantsPage } from "./routes/ParticipantsPage";
 import { TaskDetailPage } from "./routes/TaskDetailPage";
 import { TasksPage } from "./routes/TasksPage";
@@ -52,19 +55,33 @@ export function App() {
     return unsubscribe;
   }, [hasToken, queryClient]);
 
+  const [searchOpen, setSearchOpen] = useState(false);
+
   if (!hasToken) {
     return <AdminTokenGate onUnlocked={() => setHasToken(true)} />;
   }
 
   return (
-    <Routes>
-      <Route element={<Layout onSignOut={() => setHasToken(false)} />}>
-        <Route index element={<TimelinePage />} />
-        <Route path="tasks" element={<TasksPage />} />
-        <Route path="tasks/:taskId" element={<TaskDetailPage />} />
-        <Route path="participants" element={<ParticipantsPage />} />
-        <Route path="*" element={<TimelinePage />} />
-      </Route>
-    </Routes>
+    <>
+      <Routes>
+        <Route
+          element={
+            <Layout
+              onSignOut={() => setHasToken(false)}
+              onOpenSearch={() => setSearchOpen(true)}
+            />
+          }
+        >
+          <Route index element={<OverviewPage />} />
+          <Route path="timeline" element={<TimelinePage />} />
+          <Route path="tasks" element={<TasksPage />} />
+          <Route path="tasks/:taskId" element={<TaskDetailPage />} />
+          <Route path="participants" element={<ParticipantsPage />} />
+          <Route path="memory" element={<MemoryPage />} />
+          <Route path="*" element={<OverviewPage />} />
+        </Route>
+      </Routes>
+      <CommandPalette open={searchOpen} onOpenChange={setSearchOpen} />
+    </>
   );
 }

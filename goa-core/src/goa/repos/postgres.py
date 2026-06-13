@@ -56,8 +56,13 @@ from uuid import UUID
 import asyncpg
 from pydantic import TypeAdapter
 
-from goa.domain.models import Event, Participant, Task
-from goa.errors import ExternalRefInUse, TaskNotFound
+from goa.domain.models import Event, MemoryEntry, Participant, Task
+from goa.errors import (
+    ExternalRefInUse,
+    MemoryEntryTooLarge,
+    MemoryQuotaExceeded,
+    TaskNotFound,
+)
 
 
 _EVENT_ADAPTER: TypeAdapter[Event] = TypeAdapter(Event)
@@ -138,7 +143,34 @@ CREATE TABLE IF NOT EXISTS blobs (
   object_key  TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_blobs_task ON blobs(task_id);
+
+-- Agent-private memory. `owner_id` is a plain column (no FKs in this
+-- schema); cleanup is via explicit delete/purge. Prefix lookups use a
+-- `COLLATE "C"` byte-ordered range scan in the adapter, so prefix
+-- matching is exact and case-sensitive regardless of the DB collation.
+CREATE TABLE IF NOT EXISTS memory (
+  id          UUID PRIMARY KEY,
+  owner_id    UUID NOT NULL,
+  key         TEXT NOT NULL,
+  value       JSONB NOT NULL,
+  tags        JSONB NOT NULL DEFAULT '[]'::jsonb,
+  created_at  TIMESTAMPTZ NOT NULL,
+  updated_at  TIMESTAMPTZ NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_memory_owner_key ON memory(owner_id, key);
+CREATE INDEX IF NOT EXISTS ix_memory_owner ON memory(owner_id);
+-- No GIN index on `tags`: like `participants.capabilities`, tags are written
+-- through the json.dumps + ::jsonb path and stored as a jsonb *string* scalar
+-- (the double-encode the codec applies), so `tags @> …` containment never
+-- matches. Tag filtering is done in Python over the owner's (capped) entries.
 """
+
+
+def _prefix_upper(prefix: str) -> str:
+    """Exclusive upper bound for a prefix range scan
+    (`key >= prefix AND key < _prefix_upper(prefix)`). Caller guarantees a
+    non-empty prefix."""
+    return prefix[:-1] + chr(ord(prefix[-1]) + 1)
 
 
 def _row_to_task(row: asyncpg.Record, participants: list[UUID]) -> Task:
@@ -167,6 +199,25 @@ def _row_to_participant(row: asyncpg.Record) -> Participant:
         access_policy=row["access_policy"],
         api_key_hash=row["api_key_hash"],
         created_at=row["created_at"],
+    )
+
+
+def _row_to_memory(row: asyncpg.Record) -> MemoryEntry:
+    # `value`/`tags` go through the same json.dumps-on-write + `_load_jsonb`-on-
+    # read path as `tasks.metadata` / `participants.capabilities`: the pool's
+    # jsonb codec also `json.dumps`/`json.loads` at the wire, so the write
+    # double-encodes and the read must double-decode — `_load_jsonb` is that
+    # second decode. This round-trips every JSON value, including bare scalars
+    # ("hello", 42, true, null), which is verified by the Postgres run of
+    # `test_scalar_and_null_values_round_trip`.
+    return MemoryEntry(
+        id=row["id"],
+        owner_id=row["owner_id"],
+        key=row["key"],
+        value=_load_jsonb(row["value"]),
+        tags=_load_jsonb(row["tags"]),
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
     )
 
 
@@ -650,6 +701,134 @@ class PostgresAdapter:
                     participant.id,
                 )
         return participant
+
+    # ------------------------------------------------------------------
+    # MemoryStore
+    # ------------------------------------------------------------------
+
+    async def put_memory(
+        self, entry: MemoryEntry, *, max_entry_bytes: int, max_entries: int,
+    ) -> tuple[MemoryEntry, bool]:
+        encoded_value = json.dumps(entry.value)
+        if len(encoded_value.encode()) > max_entry_bytes:
+            raise MemoryEntryTooLarge()
+        encoded_tags = json.dumps(list(entry.tags))
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                # Soft count cap: only a brand-new key can be rejected. The
+                # check is best-effort (the in-memory store doesn't lock
+                # either) — under concurrency the atomic upsert below can never
+                # produce a duplicate, so the worst case is a small bounded
+                # overshoot of the cap, not a 500.
+                exists = await conn.fetchval(
+                    "SELECT 1 FROM memory WHERE owner_id = $1 AND key = $2",
+                    entry.owner_id,
+                    entry.key,
+                )
+                if exists is None:
+                    count = await conn.fetchval(
+                        "SELECT COUNT(*) FROM memory WHERE owner_id = $1",
+                        entry.owner_id,
+                    )
+                    if int(count) >= max_entries:
+                        raise MemoryQuotaExceeded()
+                # Atomic upsert. `ON CONFLICT DO UPDATE` makes a racing
+                # first-write of the same key resolve to an overwrite (never a
+                # UniqueViolation). On the update path `id` and `created_at` are
+                # left untouched, so `RETURNING` hands back the *persisted*
+                # values — the response always matches a subsequent read.
+                # `(xmax = 0)` is true only for the freshly-inserted row.
+                row = await conn.fetchrow(
+                    "INSERT INTO memory "
+                    "(id, owner_id, key, value, tags, created_at, updated_at) "
+                    "VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6, $7) "
+                    "ON CONFLICT (owner_id, key) DO UPDATE "
+                    "SET value = EXCLUDED.value, tags = EXCLUDED.tags, "
+                    "    updated_at = EXCLUDED.updated_at "
+                    "RETURNING id, created_at, (xmax = 0) AS inserted",
+                    entry.id,
+                    entry.owner_id,
+                    entry.key,
+                    encoded_value,
+                    encoded_tags,
+                    entry.created_at,
+                    entry.updated_at,
+                )
+        created = bool(row["inserted"])
+        stored = entry.model_copy(
+            update={"id": row["id"], "created_at": row["created_at"]}
+        )
+        return stored, created
+
+    async def get_memory(self, owner_id: UUID, key: str) -> MemoryEntry | None:
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT * FROM memory WHERE owner_id = $1 AND key = $2",
+                owner_id,
+                key,
+            )
+        return _row_to_memory(row) if row else None
+
+    async def list_memory(
+        self,
+        owner_id: UUID,
+        *,
+        key_prefix: str | None = None,
+        tags: list[str] | None = None,
+    ) -> list[MemoryEntry]:
+        clauses = ["owner_id = $1"]
+        params: list = [owner_id]
+        if key_prefix:
+            params.append(key_prefix)
+            lo = f"${len(params)}"
+            params.append(_prefix_upper(key_prefix))
+            hi = f"${len(params)}"
+            # `COLLATE "C"` forces byte ordering so the range scan is an
+            # exact, case-sensitive prefix match regardless of the database's
+            # default text collation — `_`/`%` are literal (no LIKE hazard).
+            clauses.append(f'key COLLATE "C" >= {lo} AND key COLLATE "C" < {hi}')
+        sql = (
+            "SELECT * FROM memory WHERE "
+            + " AND ".join(clauses)
+            + ' ORDER BY key COLLATE "C"'
+        )
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(sql, *params)
+        results = [_row_to_memory(r) for r in rows]
+        if tags:
+            wanted = set(tags)
+            results = [e for e in results if wanted.issubset(e.tags)]
+        return results
+
+    async def delete_memory(self, owner_id: UUID, key: str) -> int:
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                status = await conn.execute(
+                    "DELETE FROM memory WHERE owner_id = $1 AND key = $2",
+                    owner_id,
+                    key,
+                )
+        return int(status.split()[-1]) if status else 0
+
+    async def purge_memory(self, owner_id: UUID, *, key_prefix: str) -> int:
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                status = await conn.execute(
+                    "DELETE FROM memory WHERE owner_id = $1 "
+                    'AND key COLLATE "C" >= $2 AND key COLLATE "C" < $3',
+                    owner_id,
+                    key_prefix,
+                    _prefix_upper(key_prefix),
+                )
+        return int(status.split()[-1]) if status else 0
+
+    async def purge_owner(self, owner_id: UUID) -> int:
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                status = await conn.execute(
+                    "DELETE FROM memory WHERE owner_id = $1", owner_id,
+                )
+        return int(status.split()[-1]) if status else 0
 
     # ------------------------------------------------------------------
     # Internal helpers

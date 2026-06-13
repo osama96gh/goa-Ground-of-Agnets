@@ -1,5 +1,16 @@
-import type { Participant, PendingPair } from "../lib/types";
+import type { Participant, PendingPair } from "@/lib/types";
+import { shortId } from "@/lib/format";
 import { ParticipantBadge } from "./ParticipantBadge";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import { EmptyState } from "@/components/EmptyState";
+import { CheckCircle2 } from "lucide-react";
 
 interface Props {
   pending: PendingPair[];
@@ -9,37 +20,38 @@ interface Props {
 export function PendingPairList({ pending, participants }: Props) {
   if (pending.length === 0) {
     return (
-      <div className="rounded-md border border-slate-200 bg-white p-3 text-sm text-slate-500">
-        No pending questions on this task.
-      </div>
+      <EmptyState
+        icon={CheckCircle2}
+        title="No pending questions"
+        description="Every question on this task has been answered or cancelled."
+      />
     );
   }
   return (
-    <div className="overflow-hidden rounded-md border border-slate-200 bg-white">
-      <table className="w-full text-sm">
-        <thead className="bg-slate-50 text-left text-xs uppercase text-slate-500">
-          <tr>
-            <th className="px-3 py-2">Question id</th>
-            <th className="px-3 py-2">Awaiting reply from</th>
-          </tr>
-        </thead>
-        <tbody>
+    <div className="rounded-lg border">
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>Question id</TableHead>
+            <TableHead>Awaiting reply from</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
           {pending.map(([qid, target], idx) => (
-            <tr
-              key={`${qid}-${target}-${idx}`}
-              className="border-t border-slate-100"
-            >
-              <td className="px-3 py-2 font-mono text-xs">{qid.slice(0, 8)}…</td>
-              <td className="px-3 py-2">
+            <TableRow key={`${qid}-${target}-${idx}`}>
+              <TableCell className="font-mono text-xs">
+                {shortId(qid)}…
+              </TableCell>
+              <TableCell>
                 <ParticipantBadge
                   participant={participants.get(target)}
                   fallbackId={target}
                 />
-              </td>
-            </tr>
+              </TableCell>
+            </TableRow>
           ))}
-        </tbody>
-      </table>
+        </TableBody>
+      </Table>
     </div>
   );
 }

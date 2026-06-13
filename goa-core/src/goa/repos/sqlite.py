@@ -46,8 +46,14 @@ from uuid import UUID, uuid4
 import aiosqlite
 from pydantic import TypeAdapter
 
-from goa.domain.models import Attachment, Event, Participant, Task
-from goa.errors import BlobTooLarge, ExternalRefInUse, TaskNotFound
+from goa.domain.models import Attachment, Event, MemoryEntry, Participant, Task
+from goa.errors import (
+    BlobTooLarge,
+    ExternalRefInUse,
+    MemoryEntryTooLarge,
+    MemoryQuotaExceeded,
+    TaskNotFound,
+)
 
 
 _EVENT_ADAPTER: TypeAdapter[Event] = TypeAdapter(Event)
@@ -140,7 +146,32 @@ CREATE TABLE IF NOT EXISTS blobs (
   body        BLOB NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_blobs_task ON blobs(task_id);
+
+-- Agent-private memory. `owner_id` is a plain column (the schema uses no
+-- FKs anywhere); cleanup is via explicit delete/purge. SQLite's default
+-- BINARY collation makes the `(owner_id, key)` index a byte-ordered range
+-- scan, which is exactly what `list_memory`/`purge_memory` prefix lookups
+-- use (case-sensitive, no LIKE wildcard hazard).
+CREATE TABLE IF NOT EXISTS memory (
+  id          TEXT PRIMARY KEY,
+  owner_id    TEXT NOT NULL,
+  key         TEXT NOT NULL,
+  value       TEXT NOT NULL,
+  tags        TEXT NOT NULL DEFAULT '[]',
+  created_at  TEXT NOT NULL,
+  updated_at  TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_memory_owner_key ON memory(owner_id, key);
+CREATE INDEX IF NOT EXISTS ix_memory_owner ON memory(owner_id);
 """
+
+
+def _prefix_upper(prefix: str) -> str:
+    """Smallest string strictly greater than every string starting with
+    `prefix` — the exclusive upper bound for a prefix range scan
+    (`key >= prefix AND key < _prefix_upper(prefix)`). Caller guarantees a
+    non-empty prefix."""
+    return prefix[:-1] + chr(ord(prefix[-1]) + 1)
 
 
 def _task_to_row(task: Task) -> tuple:
@@ -204,6 +235,30 @@ def _row_to_participant(row: aiosqlite.Row) -> Participant:
         access_policy=row["access_policy"],
         api_key_hash=row["api_key_hash"],
         created_at=_parse_dt(row["created_at"]),
+    )
+
+
+def _memory_to_row(e: MemoryEntry) -> tuple:
+    return (
+        str(e.id),
+        str(e.owner_id),
+        e.key,
+        json.dumps(e.value),
+        json.dumps(list(e.tags)),
+        e.created_at.isoformat(),
+        e.updated_at.isoformat(),
+    )
+
+
+def _row_to_memory(row: aiosqlite.Row) -> MemoryEntry:
+    return MemoryEntry(
+        id=UUID(row["id"]),
+        owner_id=UUID(row["owner_id"]),
+        key=row["key"],
+        value=json.loads(row["value"]),
+        tags=json.loads(row["tags"]),
+        created_at=_parse_dt(row["created_at"]),
+        updated_at=_parse_dt(row["updated_at"]),
     )
 
 
@@ -757,6 +812,118 @@ class SqliteAdapter:
         chunk_size = 64 * 1024
         for i in range(0, len(body), chunk_size):
             yield body[i : i + chunk_size]
+
+    # ------------------------------------------------------------------
+    # MemoryStore
+    # ------------------------------------------------------------------
+
+    async def put_memory(
+        self, entry: MemoryEntry, *, max_entry_bytes: int, max_entries: int,
+    ) -> tuple[MemoryEntry, bool]:
+        encoded_value = json.dumps(entry.value)
+        if len(encoded_value.encode()) > max_entry_bytes:
+            raise MemoryEntryTooLarge()
+        # `BEGIN IMMEDIATE` (via `_transaction`) takes the write lock, so the
+        # read-existing / count-check / write below is race-free.
+        async with self._transaction():
+            async with self.conn.execute(
+                "SELECT id, created_at FROM memory WHERE owner_id = ? AND key = ?",
+                (str(entry.owner_id), entry.key),
+            ) as cur:
+                existing = await cur.fetchone()
+            created = existing is None
+            if created:
+                async with self.conn.execute(
+                    "SELECT COUNT(*) AS n FROM memory WHERE owner_id = ?",
+                    (str(entry.owner_id),),
+                ) as cur:
+                    count_row = await cur.fetchone()
+                if int(count_row["n"]) >= max_entries:
+                    raise MemoryQuotaExceeded()
+                await self.conn.execute(
+                    "INSERT INTO memory (id, owner_id, key, value, tags, "
+                    "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    _memory_to_row(entry),
+                )
+                stored = entry
+            else:
+                await self.conn.execute(
+                    "UPDATE memory SET value = ?, tags = ?, updated_at = ? "
+                    "WHERE owner_id = ? AND key = ?",
+                    (
+                        encoded_value,
+                        json.dumps(list(entry.tags)),
+                        entry.updated_at.isoformat(),
+                        str(entry.owner_id),
+                        entry.key,
+                    ),
+                )
+                # Overwrite preserves the original id and created_at — only
+                # value/tags/updated_at change, so the returned entry matches
+                # the persisted row (and a subsequent read).
+                stored = entry.model_copy(
+                    update={
+                        "id": UUID(existing["id"]),
+                        "created_at": _parse_dt(existing["created_at"]),
+                    }
+                )
+        return stored, created
+
+    async def get_memory(self, owner_id: UUID, key: str) -> MemoryEntry | None:
+        async with self.conn.execute(
+            "SELECT * FROM memory WHERE owner_id = ? AND key = ?",
+            (str(owner_id), key),
+        ) as cur:
+            row = await cur.fetchone()
+        return _row_to_memory(row) if row else None
+
+    async def list_memory(
+        self,
+        owner_id: UUID,
+        *,
+        key_prefix: str | None = None,
+        tags: list[str] | None = None,
+    ) -> list[MemoryEntry]:
+        clauses = ["owner_id = ?"]
+        params: list = [str(owner_id)]
+        if key_prefix:
+            # Byte-ordered range scan (BINARY collation) — `_`/`%` are literal,
+            # unlike LIKE, so the forget path can't over-match.
+            clauses.append("key >= ? AND key < ?")
+            params.extend([key_prefix, _prefix_upper(key_prefix)])
+        sql = "SELECT * FROM memory WHERE " + " AND ".join(clauses) + " ORDER BY key"
+        async with self.conn.execute(sql, tuple(params)) as cur:
+            rows = await cur.fetchall()
+        results = [_row_to_memory(r) for r in rows]
+        # Tags AND-filter in Python — same reasoning as participant
+        # capabilities (JSON-array storage has no portable contains operator).
+        if tags:
+            wanted = set(tags)
+            results = [e for e in results if wanted.issubset(e.tags)]
+        return results
+
+    async def delete_memory(self, owner_id: UUID, key: str) -> int:
+        async with self._transaction():
+            cur = await self.conn.execute(
+                "DELETE FROM memory WHERE owner_id = ? AND key = ?",
+                (str(owner_id), key),
+            )
+            return cur.rowcount
+
+    async def purge_memory(self, owner_id: UUID, *, key_prefix: str) -> int:
+        async with self._transaction():
+            cur = await self.conn.execute(
+                "DELETE FROM memory WHERE owner_id = ? AND key >= ? AND key < ?",
+                (str(owner_id), key_prefix, _prefix_upper(key_prefix)),
+            )
+            return cur.rowcount
+
+    async def purge_owner(self, owner_id: UUID) -> int:
+        async with self._transaction():
+            cur = await self.conn.execute(
+                "DELETE FROM memory WHERE owner_id = ?", (str(owner_id),)
+            )
+            return cur.rowcount
 
     # ------------------------------------------------------------------
     # Internal helpers

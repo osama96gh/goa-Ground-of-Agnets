@@ -1,0 +1,13 @@
+[tool.uv.workspace]
+members = ["goa-core", "goa-sdk"]
+
+[tool.uv.sources]
+goa = { workspace = true }
+goa-sdk = { workspace = true }
+
+[tool.uv]
+constraint-dependencies = [
+    "yarl<1.24.2",
+    "aiohappyeyeballs<2.6.2",
+    "trove-classifiers<2026.5.20.13",
+]

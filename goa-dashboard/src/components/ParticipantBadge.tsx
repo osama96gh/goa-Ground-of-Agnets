@@ -1,4 +1,11 @@
-import type { Participant } from "../lib/types";
+import { Bot, Server } from "lucide-react";
+import type { Participant } from "@/lib/types";
+import { shortId } from "@/lib/format";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 
 interface Props {
   participant: Participant | undefined;
@@ -8,25 +15,35 @@ interface Props {
 export function ParticipantBadge({ participant, fallbackId }: Props) {
   if (!participant) {
     return (
-      <span className="font-mono text-xs text-slate-500">
-        {fallbackId ? short(fallbackId) : "—"}
+      <span className="font-mono text-xs text-muted-foreground">
+        {fallbackId ? shortId(fallbackId) : "—"}
       </span>
     );
   }
-  const dotColor =
-    participant.type === "service" ? "bg-emerald-500" : "bg-sky-500";
+  const isService = participant.type === "service";
+  const Icon = isService ? Server : Bot;
+  const dot = isService ? "bg-emerald-500" : "bg-sky-500";
   return (
-    <span
-      title={`${participant.name} · ${participant.type}\n${participant.description}\nCapabilities: ${participant.capabilities.join(", ") || "(none)"}`}
-      className="inline-flex items-center gap-1.5 rounded border border-slate-200 bg-white px-1.5 py-0.5 text-xs"
-    >
-      <span className={`h-1.5 w-1.5 rounded-full ${dotColor}`} />
-      <span className="font-medium">{participant.name}</span>
-      <span className="text-slate-400">{short(participant.id)}</span>
-    </span>
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span className="inline-flex items-center gap-1.5 rounded-md border bg-card px-1.5 py-0.5 text-xs">
+          <span className={`h-1.5 w-1.5 rounded-full ${dot}`} />
+          <Icon className="h-3 w-3 text-muted-foreground" />
+          <span className="font-medium">{participant.name}</span>
+          <span className="text-muted-foreground">{shortId(participant.id)}</span>
+        </span>
+      </TooltipTrigger>
+      <TooltipContent className="max-w-xs">
+        <div className="font-medium">
+          {participant.name} · {participant.type}
+        </div>
+        {participant.description && (
+          <div className="text-muted-foreground">{participant.description}</div>
+        )}
+        <div className="mt-1 text-muted-foreground">
+          Capabilities: {participant.capabilities.join(", ") || "(none)"}
+        </div>
+      </TooltipContent>
+    </Tooltip>
   );
-}
-
-function short(id: string): string {
-  return id.slice(0, 8);
 }

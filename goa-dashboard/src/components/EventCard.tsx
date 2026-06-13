@@ -1,4 +1,5 @@
-import type { Event, Participant } from "../lib/types";
+import type { Event, Participant } from "@/lib/types";
+import { shortId } from "@/lib/format";
 import { AttachmentList } from "./AttachmentList";
 import { EventTypeBadge } from "./EventTypeBadge";
 import { ParticipantBadge } from "./ParticipantBadge";
@@ -10,32 +11,45 @@ interface Props {
   onTaskClick?: (taskId: string) => void;
 }
 
-export function EventCard({ event, participants, taskSubject, onTaskClick }: Props) {
+export function EventCard({
+  event,
+  participants,
+  taskSubject,
+  onTaskClick,
+}: Props) {
   const from = event.from ? participants.get(event.from) : undefined;
   const created = new Date(event.created_at).toLocaleTimeString();
   return (
-    <div className="rounded-md border border-slate-200 bg-white p-3 text-sm">
-      <div className="mb-1 flex items-center justify-between">
-        <div className="flex items-center gap-2">
+    <div className="rounded-lg border bg-card p-3 text-sm shadow-sm">
+      <div className="mb-1 flex items-center justify-between gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <EventTypeBadge type={event.event_type} />
-          <ParticipantBadge participant={from} fallbackId={event.from} />
-          {taskSubject && (
+          {event.from ? (
+            <ParticipantBadge participant={from} fallbackId={event.from} />
+          ) : (
+            <span className="text-xs text-muted-foreground">system</span>
+          )}
+          {taskSubject !== undefined && (
             <button
-              className="text-xs text-slate-500 hover:underline"
+              className="text-xs text-muted-foreground hover:text-foreground hover:underline"
               onClick={() => onTaskClick?.(event.task_id)}
             >
               · {taskSubject || "(no subject)"}
             </button>
           )}
         </div>
-        <span className="font-mono text-xs text-slate-400">{created}</span>
+        <span className="shrink-0 font-mono text-xs text-muted-foreground">
+          {created}
+        </span>
       </div>
       <PayloadView event={event} participants={participants} />
       {event.content?.text && (
-        <div className="mt-1 whitespace-pre-wrap text-slate-800">{event.content.text}</div>
+        <div className="mt-1 whitespace-pre-wrap text-foreground">
+          {event.content.text}
+        </div>
       )}
       {event.content?.data && Object.keys(event.content.data).length > 0 && (
-        <pre className="mt-1 overflow-x-auto rounded bg-slate-50 p-2 text-xs">
+        <pre className="mt-1 overflow-x-auto rounded-md bg-muted p-2 text-xs">
           {JSON.stringify(event.content.data, null, 2)}
         </pre>
       )}
@@ -56,32 +70,33 @@ function PayloadView({
   switch (event.event_type) {
     case "question":
       return (
-        <div className="text-xs text-slate-500">
-          to:{" "}
-          {event.payload.to.map((id, i) => (
-            <span key={id}>
-              {i > 0 && ", "}
-              <ParticipantBadge participant={participants.get(id)} fallbackId={id} />
-            </span>
+        <div className="flex flex-wrap items-center gap-1 text-xs text-muted-foreground">
+          to:
+          {event.payload.to.map((id) => (
+            <ParticipantBadge
+              key={id}
+              participant={participants.get(id)}
+              fallbackId={id}
+            />
           ))}
         </div>
       );
     case "answer":
       return (
-        <div className="font-mono text-xs text-slate-500">
-          answering: {event.payload.answering.map((id) => id.slice(0, 8)).join(", ")}
+        <div className="font-mono text-xs text-muted-foreground">
+          answering: {event.payload.answering.map((id) => shortId(id)).join(", ")}
         </div>
       );
     case "cancel_question":
       return (
-        <div className="font-mono text-xs text-slate-500">
-          retracts: {event.payload.retracts.map((id) => id.slice(0, 8)).join(", ")}
+        <div className="font-mono text-xs text-muted-foreground">
+          retracts: {event.payload.retracts.map((id) => shortId(id)).join(", ")}
         </div>
       );
     case "participant_joined":
       return (
-        <div className="text-xs text-slate-500">
-          joined:{" "}
+        <div className="flex items-center gap-1 text-xs text-muted-foreground">
+          joined:
           <ParticipantBadge
             participant={participants.get(event.payload.participant_id)}
             fallbackId={event.payload.participant_id}
@@ -90,21 +105,21 @@ function PayloadView({
       );
     case "child_task_created":
       return (
-        <div className="text-xs text-slate-500">
-          spawned by{" "}
+        <div className="flex flex-wrap items-center gap-1 text-xs text-muted-foreground">
+          spawned by
           <ParticipantBadge
             participant={participants.get(event.payload.spawned_by)}
             fallbackId={event.payload.spawned_by}
           />
           {" · child "}
-          <span className="font-mono">{event.payload.task_id.slice(0, 8)}</span>
+          <span className="font-mono">{shortId(event.payload.task_id)}</span>
           {event.payload.subject ? ` · "${event.payload.subject}"` : ""}
         </div>
       );
     case "parent_closed":
       return (
-        <div className="text-xs text-slate-500">
-          parent <span className="font-mono">{event.payload.task_id.slice(0, 8)}</span>{" "}
+        <div className="text-xs text-muted-foreground">
+          parent <span className="font-mono">{shortId(event.payload.task_id)}</span>{" "}
           closed
         </div>
       );

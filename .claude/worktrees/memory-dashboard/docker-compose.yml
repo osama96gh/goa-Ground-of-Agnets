@@ -1,0 +1,156 @@
+# Goa deployment — Tier 1 (self-host via Docker Compose).
+#
+# Five always-on services: web (Caddy edge), hub (FastAPI app), postgres
+# (state store), minio (S3-compatible object store for blob bytes), and
+# minio-init (one-shot bucket creator). All config is driven by `.env` —
+# no CLI flags, no profiles. To run the stack:
+#
+#     docker compose up -d
+#
+# To use an external Postgres (Supabase / Neon / RDS) instead of the bundled
+# one, set GOA_DATABASE_URL in .env to your external host AND stop the
+# bundled service:
+#
+#     docker compose up -d --scale postgres=0
+#
+# See DEPLOY.md for the full operator's guide and the Supabase
+# port-5432-not-6543 callout.
+
+services:
+
+  # Public-facing edge: TLS termination, dashboard SPA, hub reverse proxy.
+  # Built from goa-dashboard/Dockerfile — the image bakes in the SPA's
+  # static dist/; the Caddyfile is bind-mounted so operators can edit
+  # routing without rebuilding.
+  web:
+    build:
+      context: ./goa-dashboard
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"            # HTTP/3 (QUIC). Harmless on hosts without UDP forwarding.
+    environment:
+      GOA_DOMAIN: ${GOA_DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data         # Let's Encrypt cert storage. KEEP this volume.
+      - caddy-config:/config
+    depends_on:
+      hub:
+        condition: service_healthy
+
+  # Hub: the FastAPI app. Always-on. Connects to the bundled `postgres`
+  # service by default, or to whatever GOA_DATABASE_URL points at if you've
+  # pointed it elsewhere in .env.
+  hub:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      # Required
+      GOA_SERVER_PEPPER: ${GOA_SERVER_PEPPER:?GOA_SERVER_PEPPER must be set}
+      GOA_ADMIN_TOKEN:   ${GOA_ADMIN_TOKEN:?GOA_ADMIN_TOKEN must be set}
+      GOA_DATABASE_URL:  ${GOA_DATABASE_URL:?GOA_DATABASE_URL must be set}
+      # Optional — empty by default. CORS isn't needed in the canonical
+      # same-origin deploy; populate if you serve the dashboard from a
+      # different origin than the hub.
+      GOA_CORS_ORIGINS:    ${GOA_CORS_ORIGINS:-}
+      # Blob backend. With the bundled Postgres you need `s3` (Postgres
+      # holds no blob bytes in this design). Point at any S3-compatible
+      # store: AWS S3, Cloudflare R2, Supabase Storage, MinIO.
+      GOA_BLOB_BACKEND:    ${GOA_BLOB_BACKEND:-db}
+      GOA_BLOB_ENDPOINT:   ${GOA_BLOB_ENDPOINT:-}
+      GOA_BLOB_BUCKET:     ${GOA_BLOB_BUCKET:-}
+      GOA_BLOB_REGION:     ${GOA_BLOB_REGION:-}
+      GOA_BLOB_ACCESS_KEY: ${GOA_BLOB_ACCESS_KEY:-}
+      GOA_BLOB_SECRET_KEY: ${GOA_BLOB_SECRET_KEY:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O-", "http://127.0.0.1:8000/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 20s
+
+  # Bundled Postgres. Always runs as part of the stack — `.env` decides
+  # whether the hub points at this one (default) or at an external host.
+  # Stop with `docker compose up --scale postgres=0` if you're using a
+  # managed DB.
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-goa}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-goa}
+      POSTGRES_DB: ${POSTGRES_DB:-goa}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-goa} -d ${POSTGRES_DB:-goa}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # Bundled MinIO — S3-compatible object store for blob bytes. Postgres
+  # holds metadata only (filename, mime, sha256, task binding); bytes live
+  # here. To use AWS S3 / Cloudflare R2 / Supabase Storage instead, point
+  # GOA_BLOB_ENDPOINT at the external URL in .env and stop this service:
+  # `docker compose up --scale minio=0 --scale minio-init=0`.
+  #
+  # Port 9000 = S3 API (what the hub talks to). 9001 = web console for
+  # poking at buckets in your browser — not exposed by default; uncomment
+  # the second port mapping below if you want it.
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER:     ${GOA_BLOB_ACCESS_KEY:?GOA_BLOB_ACCESS_KEY must be set}
+      MINIO_ROOT_PASSWORD: ${GOA_BLOB_SECRET_KEY:?GOA_BLOB_SECRET_KEY must be set (≥8 chars)}
+    volumes:
+      - miniodata:/data
+    ports:
+      - "9000:9000"
+      # - "9001:9001"    # web console — uncomment if you want it locally
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:9000/minio/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # One-shot bucket creator. Runs once per `up`, exits 0 when the bucket
+  # exists, then the hub depends_on its `service_completed_successfully`.
+  # Idempotent: `mc mb --ignore-existing` is safe on re-run.
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER:     ${GOA_BLOB_ACCESS_KEY}
+      MINIO_ROOT_PASSWORD: ${GOA_BLOB_SECRET_KEY}
+      GOA_BLOB_BUCKET:     ${GOA_BLOB_BUCKET:-goa-blobs}
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 $$MINIO_ROOT_USER $$MINIO_ROOT_PASSWORD &&
+      mc mb --ignore-existing local/$$GOA_BLOB_BUCKET &&
+      echo 'bucket' $$GOA_BLOB_BUCKET 'ready'
+      "
+    restart: "no"
+
+volumes:
+  # Persists Let's Encrypt account + certs. Do NOT delete on `compose down`;
+  # losing this triggers cert re-issuance and you may hit rate limits.
+  caddy-data: {}
+  caddy-config: {}
+  # Bundled Postgres data dir.
+  pgdata: {}
+  # Bundled MinIO data dir (object bytes + bucket metadata).
+  miniodata: {}

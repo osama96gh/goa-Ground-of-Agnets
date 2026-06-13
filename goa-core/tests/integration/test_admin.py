@@ -262,6 +262,121 @@ async def test_admin_participant_write_endpoints_reject_wrong_token() -> None:
 
 
 # ---------------------------------------------------------------------------
+# /admin/participants/{id}/memory  (read-only)
+# ---------------------------------------------------------------------------
+
+async def _seed_memory(http: httpx.AsyncClient, api_key: str, key: str, value, tags) -> None:
+    resp = await http.post(
+        "/memory",
+        headers=_participant_auth(api_key),
+        json={"key": key, "value": value, "tags": tags},
+    )
+    resp.raise_for_status()
+
+
+async def test_admin_read_participant_memory_with_filters() -> None:
+    """Admin reads any participant's owner-scoped memory; key/prefix/tag
+    filters behave exactly like the participant-scoped `GET /memory`."""
+    app = create_app(_admin_settings())
+    async with live_server(app) as base_url:
+        async with httpx.AsyncClient(base_url=base_url) as http:
+            owner_id, key = await _register(http, type="agent", name="mem-owner")
+            await _seed_memory(http, key, "user:U1:tone", {"prefers": "email"}, ["user", "prefs"])
+            await _seed_memory(http, key, "user:U1:lang", "en", ["user"])
+            await _seed_memory(http, key, "policy/refund", {"v": 2}, ["policy"])
+
+            mem_url = f"/admin/participants/{owner_id}/memory"
+
+            # No filter → all three, owner-scoped to the queried participant.
+            resp = await http.get(mem_url, headers=_admin_auth())
+            resp.raise_for_status()
+            entries = resp.json()["entries"]
+            assert {e["key"] for e in entries} == {
+                "user:U1:tone", "user:U1:lang", "policy/refund",
+            }
+            assert all(e["owner_id"] == str(owner_id) for e in entries)
+
+            # prefix is an exact key-prefix scan.
+            resp = await http.get(mem_url, params={"prefix": "user:"}, headers=_admin_auth())
+            resp.raise_for_status()
+            assert {e["key"] for e in resp.json()["entries"]} == {
+                "user:U1:tone", "user:U1:lang",
+            }
+
+            # tags are AND-ed.
+            resp = await http.get(
+                mem_url, params=[("tag", "user"), ("tag", "prefs")], headers=_admin_auth(),
+            )
+            resp.raise_for_status()
+            assert [e["key"] for e in resp.json()["entries"]] == ["user:U1:tone"]
+
+            # key is an exact lookup (0 or 1 entries).
+            resp = await http.get(mem_url, params={"key": "user:U1:lang"}, headers=_admin_auth())
+            resp.raise_for_status()
+            entries = resp.json()["entries"]
+            assert len(entries) == 1 and entries[0]["value"] == "en"
+
+
+async def test_admin_read_memory_404_for_unknown_participant() -> None:
+    """A nonexistent owner returns 404 (not an empty list) so the dashboard
+    can distinguish "no entries" from "no such participant"."""
+    app = create_app(_admin_settings())
+    async with live_server(app) as base_url:
+        async with httpx.AsyncClient(base_url=base_url) as http:
+            resp = await http.get(
+                "/admin/participants/00000000-0000-0000-0000-000000000000/memory",
+                headers=_admin_auth(),
+            )
+            assert resp.status_code == 404
+
+
+async def test_admin_read_memory_rejects_non_admin() -> None:
+    app = create_app(_admin_settings())
+    async with live_server(app) as base_url:
+        async with httpx.AsyncClient(base_url=base_url) as http:
+            owner_id, _ = await _register(http, type="agent", name="mem-owner")
+            mem_url = f"/admin/participants/{owner_id}/memory"
+
+            resp = await http.get(mem_url, headers={"Authorization": "Bearer wrong-token"})
+            assert resp.status_code == 401
+            resp = await http.get(mem_url)  # missing bearer
+            assert resp.status_code == 401
+
+
+async def test_admin_delete_participant_releases_memory() -> None:
+    """Deleting a participant wipes its agent-private memory (§9). `owner_id`
+    has no FK, so the admin delete path must purge memory explicitly — and it
+    must not touch a different participant's entries."""
+    app = create_app(_admin_settings())
+    async with live_server(app) as base_url:
+        async with httpx.AsyncClient(base_url=base_url) as http:
+            doomed_id, doomed_key = await _register(http, type="agent", name="doomed")
+            keeper_id, keeper_key = await _register(http, type="agent", name="keeper")
+            await _seed_memory(http, doomed_key, "user:U1:tone", {"v": 1}, ["user"])
+            await _seed_memory(http, doomed_key, "policy/refund", {"v": 2}, [])
+            await _seed_memory(http, keeper_key, "user:U9:tone", {"v": 3}, ["user"])
+
+            resp = await http.delete(
+                f"/admin/participants/{doomed_id}", headers=_admin_auth(),
+            )
+            assert resp.status_code == 204
+
+            # The deleted participant is gone, and so is its memory: the admin
+            # read now 404s (no such participant) rather than returning entries.
+            resp = await http.get(
+                f"/admin/participants/{doomed_id}/memory", headers=_admin_auth(),
+            )
+            assert resp.status_code == 404
+
+            # The other participant's memory is untouched.
+            resp = await http.get(
+                f"/admin/participants/{keeper_id}/memory", headers=_admin_auth(),
+            )
+            resp.raise_for_status()
+            assert [e["key"] for e in resp.json()["entries"]] == ["user:U9:tone"]
+
+
+# ---------------------------------------------------------------------------
 # /admin/stream
 # ---------------------------------------------------------------------------
 
@@ -321,3 +436,196 @@ async def test_admin_stream_rejects_wrong_token() -> None:
                 headers={"Authorization": "Bearer wrong"},
             )
             assert resp.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# /admin/stats
+# ---------------------------------------------------------------------------
+
+async def test_admin_stats_totals_and_pending() -> None:
+    app = create_app(_admin_settings())
+    async with live_server(app) as base_url:
+        async with httpx.AsyncClient(base_url=base_url) as http:
+            _, key_init = await _register(http, type="agent", name="init")
+            target_id, _ = await _register(http, type="agent", name="target")
+            await _register(http, type="service", name="svc")
+
+            # Two tasks, both with an open question → 2 pending.
+            await create_task_with_question(
+                http, key_init, targets=[str(target_id)], subject="alpha",
+            )
+            await create_task_with_question(
+                http, key_init, targets=[str(target_id)], subject="beta",
+            )
+
+            resp = await http.get("/admin/stats", headers=_admin_auth())
+            resp.raise_for_status()
+            stats = resp.json()
+
+            totals = stats["totals"]
+            assert totals["tasks"] == 2
+            assert totals["tasks_open"] == 2
+            assert totals["tasks_closed"] == 0
+            assert totals["participants"] == 3
+            assert totals["participants_agent"] == 2
+            assert totals["participants_service"] == 1
+            assert totals["pending_questions"] == 2
+            assert totals["events_total"] >= 2  # questions (+ auto-join events)
+
+            # Event-volume buckets span the requested window and include today.
+            assert len(stats["event_volume"]) == 14
+            assert stats["events_today"] >= 2
+            assert stats["tasks_by_status"] == {"open": 2, "closed": 0}
+
+            # Backlog surfaces both pending tasks with an oldest timestamp.
+            assert len(stats["pending_backlog"]) == 2
+            assert all(
+                b["oldest_pending_at"] is not None for b in stats["pending_backlog"]
+            )
+            assert {b["subject"] for b in stats["pending_backlog"]} == {"alpha", "beta"}
+
+
+async def test_admin_stats_window_param_clamps() -> None:
+    app = create_app(_admin_settings())
+    async with live_server(app) as base_url:
+        async with httpx.AsyncClient(base_url=base_url) as http:
+            resp = await http.get(
+                "/admin/stats", params={"window": "7d"}, headers=_admin_auth(),
+            )
+            resp.raise_for_status()
+            assert len(resp.json()["event_volume"]) == 7
+
+
+# ---------------------------------------------------------------------------
+# /admin/tasks — filters + keyset pagination
+# ---------------------------------------------------------------------------
+
+async def test_admin_list_tasks_status_and_q_filters() -> None:
+    app = create_app(_admin_settings())
+    async with live_server(app) as base_url:
+        async with httpx.AsyncClient(base_url=base_url) as http:
+            _, key_init = await _register(http, type="agent", name="init")
+            target_id, _ = await _register(http, type="agent", name="target")
+
+            keep_id, _ = await create_task_with_question(
+                http, key_init, targets=[str(target_id)], subject="keep-me",
+            )
+            close_id, _ = await create_task_with_question(
+                http, key_init, targets=[str(target_id)], subject="close-me",
+            )
+            await http.post(
+                f"/admin/tasks/{close_id}/close", headers=_admin_auth(),
+            )
+
+            # status=open excludes the closed one.
+            resp = await http.get(
+                "/admin/tasks", params={"status": "open"}, headers=_admin_auth(),
+            )
+            resp.raise_for_status()
+            ids = {UUID(i["task"]["id"]) for i in resp.json()["tasks"]}
+            assert keep_id in ids and close_id not in ids
+
+            # status=closed is the complement.
+            resp = await http.get(
+                "/admin/tasks", params={"status": "closed"}, headers=_admin_auth(),
+            )
+            ids = {UUID(i["task"]["id"]) for i in resp.json()["tasks"]}
+            assert ids == {close_id}
+
+            # q matches on subject substring (case-insensitive).
+            resp = await http.get(
+                "/admin/tasks", params={"q": "KEEP"}, headers=_admin_auth(),
+            )
+            subjects = [i["task"]["subject"] for i in resp.json()["tasks"]]
+            assert subjects == ["keep-me"]
+
+
+async def test_admin_list_tasks_keyset_pagination() -> None:
+    app = create_app(_admin_settings())
+    async with live_server(app) as base_url:
+        async with httpx.AsyncClient(base_url=base_url) as http:
+            _, key_init = await _register(http, type="agent", name="init")
+            target_id, _ = await _register(http, type="agent", name="target")
+
+            created: list[UUID] = []
+            for n in range(5):
+                tid, _ = await create_task_with_question(
+                    http, key_init, targets=[str(target_id)], subject=f"t{n}",
+                )
+                created.append(tid)
+
+            # Walk pages of 2; collect every id, assert no dupes / no gaps.
+            seen: list[UUID] = []
+            cursor: str | None = None
+            pages = 0
+            while True:
+                params = {"limit": "2"}
+                if cursor:
+                    params["cursor"] = cursor
+                resp = await http.get(
+                    "/admin/tasks", params=params, headers=_admin_auth(),
+                )
+                resp.raise_for_status()
+                body = resp.json()
+                seen.extend(UUID(i["task"]["id"]) for i in body["tasks"])
+                cursor = body["next_cursor"]
+                pages += 1
+                if cursor is None:
+                    break
+                assert pages < 10  # guard against an infinite loop
+
+            assert len(seen) == len(set(seen)) == 5
+            assert set(seen) == set(created)
+
+
+# ---------------------------------------------------------------------------
+# /admin/tasks/{id}/close
+# ---------------------------------------------------------------------------
+
+async def test_admin_close_bypasses_initiator_and_fans_out() -> None:
+    app = create_app(_admin_settings())
+    async with live_server(app) as base_url:
+        async with httpx.AsyncClient(base_url=base_url) as http:
+            _, key_init = await _register(http, type="agent", name="init")
+            target_id, _ = await _register(http, type="agent", name="target")
+
+            parent_id, _ = await create_task_with_question(
+                http, key_init, targets=[str(target_id)], subject="parent",
+            )
+            child_id, _ = await create_task_with_question(
+                http, key_init, targets=[str(target_id)], subject="child",
+                parent_task_id=str(parent_id),
+            )
+
+            # Admin (not the initiator, not even a participant) closes the parent.
+            resp = await http.post(
+                f"/admin/tasks/{parent_id}/close", headers=_admin_auth(),
+            )
+            resp.raise_for_status()
+            assert resp.json()["task"]["status"] == "closed"
+
+            # Child received a parent_closed system event.
+            resp = await http.get(f"/admin/tasks/{child_id}", headers=_admin_auth())
+            resp.raise_for_status()
+            assert any(
+                ev["event_type"] == "parent_closed"
+                for ev in resp.json()["events"]
+            )
+
+            # Idempotent: a second close returns 200 and stays closed.
+            resp = await http.post(
+                f"/admin/tasks/{parent_id}/close", headers=_admin_auth(),
+            )
+            assert resp.status_code == 200
+            assert resp.json()["task"]["status"] == "closed"
+
+
+async def test_admin_close_unknown_task_404() -> None:
+    app = create_app(_admin_settings())
+    async with live_server(app) as base_url:
+        async with httpx.AsyncClient(base_url=base_url) as http:
+            resp = await http.post(
+                "/admin/tasks/00000000-0000-0000-0000-000000000000/close",
+                headers=_admin_auth(),
+            )
+            assert resp.status_code == 404

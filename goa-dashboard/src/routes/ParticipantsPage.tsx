@@ -1,240 +1,384 @@
-import { useState } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { listAdminParticipants, deleteAdminParticipant } from "../api/admin";
-import { ParticipantFormModal } from "../components/ParticipantFormModal";
-import type { Participant } from "../lib/types";
+import { useEffect, useState } from "react";
+import { Link, useSearchParams } from "react-router-dom";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
+import { Bot, Brain, Copy, Plus, Search, Server, Trash2 } from "lucide-react";
+import {
+  deleteAdminParticipant,
+  listAdminParticipants,
+} from "@/api/admin";
+import { ParticipantFormModal } from "@/components/ParticipantFormModal";
+import { EmptyState } from "@/components/EmptyState";
+import type { Participant } from "@/lib/types";
+import { shortId } from "@/lib/format";
+import { cn } from "@/lib/utils";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { Input } from "@/components/ui/input";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Skeleton } from "@/components/ui/skeleton";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import {
+  Dialog,
+  DialogClose,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 
 export function ParticipantsPage() {
-  const queryClient = useQueryClient();
+  const qc = useQueryClient();
+  const [searchParams] = useSearchParams();
+  const focusId = searchParams.get("focus");
 
+  const [searchInput, setSearchInput] = useState("");
   const [q, setQ] = useState("");
-  const [type, setType] = useState<"" | "agent" | "service">("");
+  const [type, setType] = useState<"all" | "agent" | "service">("all");
   const [capability, setCapability] = useState("");
 
-  const [formModal, setFormModal] = useState<
-    | { mode: "add" }
-    | { mode: "edit"; participant: Participant }
-    | null
-  >(null);
+  const [formOpen, setFormOpen] = useState(false);
+  const [editing, setEditing] = useState<Participant | null>(null);
   const [apiKeyFlash, setApiKeyFlash] = useState<string | null>(null);
-  const [pendingDelete, setPendingDelete] = useState<string | null>(null);
-  const [deleting, setDeleting] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState<Participant[] | null>(null);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+
+  useEffect(() => {
+    const id = setTimeout(() => setQ(searchInput.trim()), 300);
+    return () => clearTimeout(id);
+  }, [searchInput]);
 
   const { data: participants, isLoading } = useQuery({
     queryKey: ["admin", "participants", q, type, capability],
     queryFn: () =>
       listAdminParticipants({
         q: q || undefined,
-        type: type || undefined,
-        capability: capability ? capability.split(/\s+/).filter(Boolean) : undefined,
+        type: type === "all" ? undefined : type,
+        capability: capability
+          ? capability.split(/\s+/).filter(Boolean)
+          : undefined,
       }),
   });
 
-  function invalidate() {
-    queryClient.invalidateQueries({ queryKey: ["admin", "participants"] });
-  }
+  const invalidate = () =>
+    qc.invalidateQueries({ queryKey: ["admin", "participants"] });
 
-  async function handleDelete(id: string) {
-    if (pendingDelete !== id) {
-      setPendingDelete(id);
-      return;
-    }
-    setDeleting(true);
-    try {
-      await deleteAdminParticipant(id);
+  const deleteMutation = useMutation({
+    mutationFn: (ids: string[]) => Promise.all(ids.map(deleteAdminParticipant)),
+    onSuccess: (_r, ids) => {
+      toast.success(`Deleted ${ids.length} participant${ids.length === 1 ? "" : "s"}.`);
+      setSelected(new Set());
+      setConfirmDelete(null);
       invalidate();
-    } finally {
-      setDeleting(false);
-      setPendingDelete(null);
-    }
-  }
+    },
+  });
+
+  const list = participants ?? [];
+  const toggle = (id: string) =>
+    setSelected((prev) => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
 
   return (
     <div className="space-y-4">
-      {apiKeyFlash && (
-        <div className="flex items-start gap-3 rounded-md border border-green-300 bg-green-50 px-4 py-3">
-          <div className="flex-1">
-            <p className="text-sm font-medium text-green-800">
-              API key (shown once — copy now)
-            </p>
-            <p className="mt-1 break-all font-mono text-xs text-green-700">
-              {apiKeyFlash}
-            </p>
-          </div>
-          <button
+      <div className="flex items-end justify-between">
+        <div>
+          <h1 className="text-2xl font-semibold tracking-tight">Participants</h1>
+          <p className="text-sm text-muted-foreground">
+            Registry of agents and services. Capability filter is AND-ed.
+          </p>
+        </div>
+        <div className="flex gap-2">
+          {selected.size > 0 && (
+            <Button
+              variant="destructive"
+              onClick={() =>
+                setConfirmDelete(list.filter((p) => selected.has(p.id)))
+              }
+            >
+              <Trash2 className="h-4 w-4" />
+              Delete {selected.size}
+            </Button>
+          )}
+          <Button
             onClick={() => {
-              navigator.clipboard.writeText(apiKeyFlash);
+              setEditing(null);
+              setFormOpen(true);
             }}
-            className="shrink-0 rounded border border-green-300 bg-white px-2 py-1 text-xs text-green-700 hover:bg-green-100"
           >
-            Copy
-          </button>
-          <button
-            onClick={() => setApiKeyFlash(null)}
-            className="shrink-0 text-green-500 hover:text-green-700"
-            aria-label="Dismiss"
-          >
-            ✕
-          </button>
+            <Plus className="h-4 w-4" />
+            Add participant
+          </Button>
+        </div>
+      </div>
+
+      {/* Filter bar */}
+      <div className="flex flex-wrap items-center gap-2 rounded-lg border bg-card p-3">
+        <div className="relative flex-1 min-w-[200px]">
+          <Search className="absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            value={searchInput}
+            onChange={(e) => setSearchInput(e.target.value)}
+            placeholder="Search name or description…"
+            className="pl-8"
+          />
+        </div>
+        <Input
+          value={capability}
+          onChange={(e) => setCapability(e.target.value)}
+          placeholder="capabilities (space-separated)"
+          className="w-60"
+        />
+        <Select value={type} onValueChange={(v) => setType(v as typeof type)}>
+          <SelectTrigger className="w-36">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">All types</SelectItem>
+            <SelectItem value="agent">Agents</SelectItem>
+            <SelectItem value="service">Services</SelectItem>
+          </SelectContent>
+        </Select>
+      </div>
+
+      {isLoading ? (
+        <div className="space-y-2">
+          {Array.from({ length: 5 }).map((_, i) => (
+            <Skeleton key={i} className="h-12" />
+          ))}
+        </div>
+      ) : list.length === 0 ? (
+        <EmptyState
+          icon={Bot}
+          title="No participants match"
+          description="Adjust the filters, or add a participant to get started."
+        />
+      ) : (
+        <div className="rounded-lg border">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead className="w-10">
+                  <Checkbox
+                    checked={
+                      list.length > 0 && list.every((p) => selected.has(p.id))
+                    }
+                    onCheckedChange={(c) =>
+                      setSelected(c ? new Set(list.map((p) => p.id)) : new Set())
+                    }
+                    aria-label="Select all"
+                  />
+                </TableHead>
+                <TableHead>Name</TableHead>
+                <TableHead>Type</TableHead>
+                <TableHead>Capabilities</TableHead>
+                <TableHead>ID</TableHead>
+                <TableHead className="text-right">Actions</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {list.map((p) => (
+                <TableRow
+                  key={p.id}
+                  data-state={selected.has(p.id) ? "selected" : undefined}
+                  className={cn(focusId === p.id && "ring-2 ring-inset ring-primary")}
+                >
+                  <TableCell>
+                    <Checkbox
+                      checked={selected.has(p.id)}
+                      onCheckedChange={() => toggle(p.id)}
+                      aria-label="Select participant"
+                    />
+                  </TableCell>
+                  <TableCell>
+                    <div className="font-medium">{p.name}</div>
+                    {p.description && (
+                      <div className="text-xs text-muted-foreground">
+                        {p.description}
+                      </div>
+                    )}
+                  </TableCell>
+                  <TableCell>
+                    <Badge variant="outline" className="gap-1">
+                      {p.type === "service" ? (
+                        <Server className="h-3 w-3" />
+                      ) : (
+                        <Bot className="h-3 w-3" />
+                      )}
+                      {p.type}
+                    </Badge>
+                  </TableCell>
+                  <TableCell>
+                    {p.capabilities.length === 0 ? (
+                      <span className="text-muted-foreground">—</span>
+                    ) : (
+                      <div className="flex flex-wrap gap-1">
+                        {p.capabilities.map((c) => (
+                          <Badge key={c} variant="secondary">
+                            {c}
+                          </Badge>
+                        ))}
+                      </div>
+                    )}
+                  </TableCell>
+                  <TableCell className="font-mono text-xs text-muted-foreground">
+                    {shortId(p.id)}
+                  </TableCell>
+                  <TableCell>
+                    <div className="flex items-center justify-end gap-1">
+                      <Button variant="ghost" size="sm" asChild>
+                        <Link to={`/memory?participant=${p.id}`}>
+                          <Brain className="h-4 w-4" />
+                          Memory
+                        </Link>
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => {
+                          setEditing(p);
+                          setFormOpen(true);
+                        }}
+                      >
+                        Edit
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="text-muted-foreground hover:text-destructive"
+                        onClick={() => setConfirmDelete([p])}
+                        aria-label="Delete participant"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
+                    </div>
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
         </div>
       )}
 
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-semibold">Participants</h1>
-          <p className="text-sm text-slate-500">
-            Registry directory. Capability filter is space-separated and AND-ed.
-          </p>
-        </div>
-        <button
-          onClick={() => setFormModal({ mode: "add" })}
-          className="rounded bg-slate-800 px-3 py-1.5 text-sm text-white hover:bg-slate-700"
-        >
-          + Add participant
-        </button>
-      </div>
-
-      <div className="grid grid-cols-3 gap-3 rounded-md border border-slate-200 bg-white p-3">
-        <label className="block">
-          <span className="text-xs font-medium text-slate-600">Search</span>
-          <input
-            type="text"
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
-            placeholder="name or description"
-            className="mt-1 block w-full rounded border border-slate-300 px-2 py-1 text-sm"
-          />
-        </label>
-        <label className="block">
-          <span className="text-xs font-medium text-slate-600">Capabilities</span>
-          <input
-            type="text"
-            value={capability}
-            onChange={(e) => setCapability(e.target.value)}
-            placeholder="payments support"
-            className="mt-1 block w-full rounded border border-slate-300 px-2 py-1 text-sm"
-          />
-        </label>
-        <label className="block">
-          <span className="text-xs font-medium text-slate-600">Type</span>
-          <select
-            value={type}
-            onChange={(e) => setType(e.target.value as "" | "agent" | "service")}
-            className="mt-1 block w-full rounded border border-slate-300 px-2 py-1 text-sm"
-          >
-            <option value="">all</option>
-            <option value="agent">agent</option>
-            <option value="service">service</option>
-          </select>
-        </label>
-      </div>
-
-      {isLoading && <div className="text-sm text-slate-500">Loading…</div>}
-      <div className="overflow-hidden rounded-md border border-slate-200 bg-white">
-        <table className="w-full text-sm">
-          <thead className="bg-slate-50 text-left text-xs uppercase text-slate-500">
-            <tr>
-              <th className="px-3 py-2">Name</th>
-              <th className="px-3 py-2">Type</th>
-              <th className="px-3 py-2">Capabilities</th>
-              <th className="px-3 py-2">Description</th>
-              <th className="px-3 py-2">ID</th>
-              <th className="px-3 py-2">Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {(participants ?? []).map((p) => (
-              <tr key={p.id} className="border-t border-slate-100">
-                <td className="px-3 py-2 font-medium">{p.name}</td>
-                <td className="px-3 py-2">{p.type}</td>
-                <td className="px-3 py-2">
-                  {p.capabilities.length === 0 ? (
-                    <span className="text-slate-400">(none)</span>
-                  ) : (
-                    p.capabilities.map((c) => (
-                      <span
-                        key={c}
-                        className="mr-1 inline-block rounded bg-slate-100 px-1.5 py-0.5 text-xs"
-                      >
-                        {c}
-                      </span>
-                    ))
-                  )}
-                </td>
-                <td className="px-3 py-2 text-slate-600">{p.description || "—"}</td>
-                <td className="px-3 py-2 font-mono text-xs text-slate-400">
-                  {p.id.slice(0, 8)}
-                </td>
-                <td className="px-3 py-2">
-                  <div className="flex items-center gap-2">
-                    <button
-                      onClick={() => setFormModal({ mode: "edit", participant: p })}
-                      className="text-xs text-slate-500 underline hover:text-slate-800"
-                    >
-                      Edit
-                    </button>
-                    <button
-                      onClick={() => handleDelete(p.id)}
-                      disabled={deleting && pendingDelete === p.id}
-                      className={`text-xs underline ${
-                        pendingDelete === p.id
-                          ? "text-red-600 hover:text-red-800"
-                          : "text-slate-500 hover:text-red-600"
-                      }`}
-                    >
-                      {pendingDelete === p.id
-                        ? deleting
-                          ? "Deleting…"
-                          : "Confirm?"
-                        : "Delete"}
-                    </button>
-                    {pendingDelete === p.id && !deleting && (
-                      <button
-                        onClick={() => setPendingDelete(null)}
-                        className="text-xs text-slate-400 underline hover:text-slate-600"
-                      >
-                        Cancel
-                      </button>
-                    )}
-                  </div>
-                </td>
-              </tr>
-            ))}
-            {participants && participants.length === 0 && (
-              <tr>
-                <td colSpan={6} className="px-3 py-6 text-center text-slate-500">
-                  No participants match.
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
-      </div>
-
-      {formModal &&
-        (formModal.mode === "add" ? (
+      {/* Add / edit modal — keyed so state resets between opens. */}
+      {formOpen &&
+        (editing ? (
           <ParticipantFormModal
-            mode="add"
-            onClose={() => setFormModal(null)}
-            onSuccess={({ api_key }) => {
-              setFormModal(null);
+            key={editing.id}
+            mode="edit"
+            initialValues={editing}
+            open={formOpen}
+            onOpenChange={setFormOpen}
+            onSuccess={() => {
+              setFormOpen(false);
               invalidate();
-              if (api_key) {
-                setApiKeyFlash(api_key);
-              }
+              toast.success("Participant updated.");
             }}
           />
         ) : (
           <ParticipantFormModal
-            mode="edit"
-            initialValues={formModal.participant}
-            onClose={() => setFormModal(null)}
-            onSuccess={() => {
-              setFormModal(null);
+            key="add"
+            mode="add"
+            open={formOpen}
+            onOpenChange={setFormOpen}
+            onSuccess={({ api_key }) => {
+              setFormOpen(false);
               invalidate();
+              if (api_key) setApiKeyFlash(api_key);
             }}
           />
         ))}
+
+      {/* API key reveal-once dialog */}
+      <Dialog
+        open={apiKeyFlash !== null}
+        onOpenChange={(o) => !o && setApiKeyFlash(null)}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>API key created</DialogTitle>
+            <DialogDescription>
+              Copy this now — it is shown only once and cannot be retrieved later.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex items-center gap-2 rounded-md border bg-muted/50 p-3">
+            <code className="flex-1 break-all font-mono text-xs">
+              {apiKeyFlash}
+            </code>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                if (apiKeyFlash) {
+                  navigator.clipboard.writeText(apiKeyFlash);
+                  toast.success("Copied to clipboard.");
+                }
+              }}
+            >
+              <Copy className="h-3.5 w-3.5" />
+              Copy
+            </Button>
+          </div>
+          <DialogFooter>
+            <DialogClose asChild>
+              <Button>Done</Button>
+            </DialogClose>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Delete confirmation */}
+      <Dialog
+        open={confirmDelete !== null}
+        onOpenChange={(o) => !o && setConfirmDelete(null)}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>
+              Delete {confirmDelete?.length === 1 ? "participant" : "participants"}?
+            </DialogTitle>
+            <DialogDescription>
+              This permanently removes{" "}
+              {confirmDelete?.length === 1
+                ? confirmDelete[0].name
+                : `${confirmDelete?.length} participants`}{" "}
+              and purges all of their agent-private memory. This cannot be undone.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setConfirmDelete(null)}>
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              disabled={deleteMutation.isPending}
+              onClick={() =>
+                confirmDelete &&
+                deleteMutation.mutate(confirmDelete.map((p) => p.id))
+              }
+            >
+              {deleteMutation.isPending ? "Deleting…" : "Delete"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

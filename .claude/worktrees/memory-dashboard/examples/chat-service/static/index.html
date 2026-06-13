@@ -1,0 +1,328 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>goa chat-service demo</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; }
+    body {
+      font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+            Oxygen, Ubuntu, Cantarell, sans-serif;
+      color: #1e293b;
+      background: #f8fafc;
+      display: flex;
+      flex-direction: column;
+    }
+
+    header {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      padding: 12px 16px;
+      border-bottom: 1px solid #e2e8f0;
+      background: #fff;
+      flex-wrap: wrap;
+    }
+    header h1 {
+      font-size: 14px;
+      font-weight: 600;
+      margin: 0 8px 0 0;
+      color: #0f172a;
+    }
+    header label {
+      font-size: 12px;
+      color: #64748b;
+      margin-right: 4px;
+    }
+    select, input[type="text"], textarea, button {
+      font: inherit;
+      color: inherit;
+      border: 1px solid #cbd5e1;
+      border-radius: 6px;
+      padding: 6px 10px;
+      background: #fff;
+    }
+    select, input[type="text"] { min-width: 180px; }
+    button {
+      background: #2563eb;
+      border-color: #2563eb;
+      color: #fff;
+      cursor: pointer;
+    }
+    button:hover { background: #1d4ed8; }
+    button:disabled {
+      background: #cbd5e1;
+      border-color: #cbd5e1;
+      cursor: not-allowed;
+    }
+    button.ghost {
+      background: #fff;
+      border-color: #cbd5e1;
+      color: #1e293b;
+    }
+    button.ghost:hover { background: #f1f5f9; }
+    .toast {
+      margin-left: auto;
+      padding: 6px 10px;
+      border-radius: 6px;
+      font-size: 12px;
+      background: #fee2e2;
+      color: #991b1b;
+      display: none;
+    }
+    .toast.show { display: block; }
+
+    main {
+      flex: 1;
+      overflow-y: auto;
+      padding: 24px 16px;
+    }
+    .empty {
+      color: #94a3b8;
+      text-align: center;
+      margin-top: 48px;
+      font-size: 13px;
+    }
+    .bubble {
+      max-width: 580px;
+      margin: 6px 0;
+      padding: 8px 12px;
+      border-radius: 10px;
+      font-size: 14px;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .bubble .meta {
+      font-size: 11px;
+      color: #64748b;
+      margin-bottom: 2px;
+      display: flex;
+      gap: 8px;
+    }
+    .bubble.you {
+      margin-left: auto;
+      background: #2563eb;
+      color: #fff;
+    }
+    .bubble.you .meta { color: #dbeafe; }
+    .bubble.support {
+      margin-right: auto;
+      background: #fff;
+      border: 1px solid #e2e8f0;
+    }
+    .bubble.system, .bubble.other {
+      margin: 6px auto;
+      background: #f1f5f9;
+      color: #475569;
+      font-size: 12px;
+      border: 1px dashed #cbd5e1;
+    }
+
+    footer {
+      padding: 12px 16px;
+      border-top: 1px solid #e2e8f0;
+      background: #fff;
+      display: flex;
+      gap: 8px;
+      align-items: flex-end;
+    }
+    footer textarea {
+      flex: 1;
+      resize: none;
+      min-height: 44px;
+      max-height: 160px;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>goa chat-service</h1>
+
+    <label for="thread">thread</label>
+    <select id="thread">
+      <option value="">(select a thread)</option>
+    </select>
+
+    <label for="newThread">or new</label>
+    <input id="newThread" type="text" placeholder="new thread name" />
+    <button id="newBtn" class="ghost" type="button">New</button>
+
+    <span id="toast" class="toast"></span>
+  </header>
+
+  <main id="messages">
+    <div class="empty" id="emptyState">Pick or create a thread to start chatting.</div>
+  </main>
+
+  <footer>
+    <textarea id="composer" placeholder="Type a message…" disabled></textarea>
+    <button id="sendBtn" type="button" disabled>Send</button>
+  </footer>
+
+  <script>
+    const threadSelect = document.getElementById("thread");
+    const newThreadInput = document.getElementById("newThread");
+    const newBtn = document.getElementById("newBtn");
+    const messagesEl = document.getElementById("messages");
+    const emptyState = document.getElementById("emptyState");
+    const composer = document.getElementById("composer");
+    const sendBtn = document.getElementById("sendBtn");
+    const toast = document.getElementById("toast");
+
+    let activeRef = null;
+    let lastSignature = "";
+
+    function showToast(msg) {
+      toast.textContent = msg;
+      toast.classList.add("show");
+      setTimeout(() => toast.classList.remove("show"), 4000);
+    }
+
+    function setActiveRef(ref) {
+      activeRef = ref || null;
+      const enabled = !!activeRef;
+      composer.disabled = !enabled;
+      sendBtn.disabled = !enabled;
+      if (!enabled) {
+        threadSelect.value = "";
+      }
+      lastSignature = "";
+      messagesEl.replaceChildren(emptyState);
+      emptyState.style.display = enabled ? "none" : "";
+      if (enabled) {
+        emptyState.textContent = "Loading…";
+        emptyState.style.display = "";
+        refreshMessages();
+      } else {
+        emptyState.textContent = "Pick or create a thread to start chatting.";
+      }
+    }
+
+    async function fetchJson(url, opts) {
+      const resp = await fetch(url, opts);
+      if (!resp.ok) {
+        let msg = resp.statusText;
+        try {
+          const body = await resp.json();
+          msg = body.detail || body.error || JSON.stringify(body);
+        } catch (_) {}
+        throw new Error(msg);
+      }
+      return resp.json();
+    }
+
+    async function refreshThreads() {
+      try {
+        const rows = await fetchJson("/api/threads");
+        const current = threadSelect.value;
+        threadSelect.replaceChildren();
+        const placeholder = document.createElement("option");
+        placeholder.value = "";
+        placeholder.textContent = "(select a thread)";
+        threadSelect.appendChild(placeholder);
+        for (const r of rows) {
+          const opt = document.createElement("option");
+          opt.value = r.external_ref;
+          opt.textContent = r.external_ref;
+          threadSelect.appendChild(opt);
+        }
+        if (activeRef && rows.some(r => r.external_ref === activeRef)) {
+          threadSelect.value = activeRef;
+        } else if (current && rows.some(r => r.external_ref === current)) {
+          threadSelect.value = current;
+        }
+      } catch (e) {
+        showToast("Couldn’t load threads: " + e.message);
+      }
+    }
+
+    async function refreshMessages() {
+      if (!activeRef) return;
+      let payload;
+      try {
+        payload = await fetchJson(
+          "/api/messages?external_ref=" + encodeURIComponent(activeRef)
+        );
+      } catch (e) {
+        showToast("Couldn’t load messages: " + e.message);
+        return;
+      }
+      const sig = JSON.stringify(payload.messages.map(m => m.id));
+      if (sig === lastSignature) return;
+      lastSignature = sig;
+      renderMessages(payload.messages);
+    }
+
+    function renderMessages(messages) {
+      messagesEl.replaceChildren();
+      if (messages.length === 0) {
+        const p = document.createElement("div");
+        p.className = "empty";
+        p.textContent = "No messages yet — say hi.";
+        messagesEl.appendChild(p);
+        return;
+      }
+      for (const m of messages) {
+        const div = document.createElement("div");
+        div.className = "bubble " + m.from_role;
+        const meta = document.createElement("div");
+        meta.className = "meta";
+        const who = document.createElement("span");
+        who.textContent = m.from_role + " · " + m.kind;
+        const when = document.createElement("span");
+        when.textContent = new Date(m.created_at).toLocaleTimeString();
+        meta.append(who, when);
+        const body = document.createElement("div");
+        body.textContent = m.text || "(no text)";
+        div.append(meta, body);
+        messagesEl.appendChild(div);
+      }
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
+
+    async function sendMessage() {
+      const text = composer.value.trim();
+      if (!text || !activeRef) return;
+      sendBtn.disabled = true;
+      try {
+        await fetchJson("/api/send", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ external_ref: activeRef, message: text }),
+        });
+        composer.value = "";
+        await refreshMessages();
+        await refreshThreads();
+      } catch (e) {
+        showToast("Send failed: " + e.message);
+      } finally {
+        sendBtn.disabled = !activeRef;
+      }
+    }
+
+    threadSelect.addEventListener("change", () => setActiveRef(threadSelect.value));
+    newBtn.addEventListener("click", () => {
+      const name = newThreadInput.value.trim();
+      if (!name) return;
+      newThreadInput.value = "";
+      setActiveRef(name);
+    });
+    newThreadInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); newBtn.click(); }
+    });
+    sendBtn.addEventListener("click", sendMessage);
+    composer.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        sendMessage();
+      }
+    });
+
+    refreshThreads();
+    setInterval(refreshThreads, 5000);
+    setInterval(refreshMessages, 1500);
+  </script>
+</body>
+</html>

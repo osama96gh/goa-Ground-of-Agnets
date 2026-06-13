@@ -28,6 +28,13 @@
       "port": 5173
     },
     {
+      "name": "goa-dashboard-ground",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev", "--", "--port", "5174", "--strictPort"],
+      "cwd": "/Users/osamaghazal/Development/Projects/goa-Ground-of-Agnets/goa-dashboard",
+      "port": 5174
+    },
+    {
       "name": "chat-service",
       "runtimeExecutable": "/Users/osamaghazal/Development/Projects/goa-God-of-Agnets/.venv/bin/python",
       "runtimeArgs": [

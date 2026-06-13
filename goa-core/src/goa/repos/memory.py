@@ -13,13 +13,20 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from collections.abc import AsyncIterator
 from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
-from goa.domain.models import Attachment, Event, Participant, Task
-from goa.errors import BlobTooLarge, ExternalRefInUse, TaskNotFound
+from goa.domain.models import Attachment, Event, MemoryEntry, Participant, Task
+from goa.errors import (
+    BlobTooLarge,
+    ExternalRefInUse,
+    MemoryEntryTooLarge,
+    MemoryQuotaExceeded,
+    TaskNotFound,
+)
 
 
 def _now() -> datetime:
@@ -328,3 +335,73 @@ class InMemoryBlobStore:
         chunk_size = 64 * 1024
         for i in range(0, len(body), chunk_size):
             yield body[i : i + chunk_size]
+
+
+class InMemoryMemoryStore:
+    """Single-replica `MemoryStore`. Owner-private key→document map held
+    in-process — restart wipes it. Persistent backends (SQLite, Postgres)
+    implement the same Protocol. No locking: under asyncio there is no
+    `await` between the read and the mutate in `put_memory`, so the
+    check-then-write is atomic within the replica."""
+
+    def __init__(self) -> None:
+        self._by_owner: dict[UUID, dict[str, MemoryEntry]] = {}
+
+    async def put_memory(
+        self, entry: MemoryEntry, *, max_entry_bytes: int, max_entries: int,
+    ) -> tuple[MemoryEntry, bool]:
+        if len(json.dumps(entry.value).encode()) > max_entry_bytes:
+            raise MemoryEntryTooLarge()
+        owner = self._by_owner.setdefault(entry.owner_id, {})
+        existing = owner.get(entry.key)
+        if existing is None and len(owner) >= max_entries:
+            raise MemoryQuotaExceeded()
+        if existing is not None:
+            # Overwrite preserves the original id and created_at; only
+            # value/tags/updated_at change (updated_at already reflects "now").
+            entry = entry.model_copy(
+                update={"id": existing.id, "created_at": existing.created_at}
+            )
+        owner[entry.key] = entry
+        return entry, existing is None
+
+    async def get_memory(self, owner_id: UUID, key: str) -> MemoryEntry | None:
+        return self._by_owner.get(owner_id, {}).get(key)
+
+    async def list_memory(
+        self,
+        owner_id: UUID,
+        *,
+        key_prefix: str | None = None,
+        tags: list[str] | None = None,
+    ) -> list[MemoryEntry]:
+        entries = list(self._by_owner.get(owner_id, {}).values())
+        if key_prefix:
+            # `startswith` is an exact prefix match — no `_`/`%` wildcard
+            # hazard, unlike the SQL backends' range-scan equivalent.
+            entries = [e for e in entries if e.key.startswith(key_prefix)]
+        if tags:
+            wanted = set(tags)
+            entries = [e for e in entries if wanted.issubset(e.tags)]
+        entries.sort(key=lambda e: e.key)
+        return entries
+
+    async def delete_memory(self, owner_id: UUID, key: str) -> int:
+        owner = self._by_owner.get(owner_id)
+        if owner is not None and key in owner:
+            del owner[key]
+            return 1
+        return 0
+
+    async def purge_memory(self, owner_id: UUID, *, key_prefix: str) -> int:
+        owner = self._by_owner.get(owner_id)
+        if not owner:
+            return 0
+        doomed = [k for k in owner if k.startswith(key_prefix)]
+        for k in doomed:
+            del owner[k]
+        return len(doomed)
+
+    async def purge_owner(self, owner_id: UUID) -> int:
+        owner = self._by_owner.pop(owner_id, None)
+        return len(owner) if owner else 0

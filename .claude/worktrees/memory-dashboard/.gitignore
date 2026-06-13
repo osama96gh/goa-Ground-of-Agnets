@@ -1,0 +1,23 @@
+.venv/
+.env
+.env.docker
+.env.local
+.env.*.local
+# Allow templates: .env.example, .env.docker.example
+examples/*/.env
+examples/http/.env.http
+__pycache__/
+*.pyc
+.pytest_cache/
+.DS_Store
+*.egg-info/
+.tokens/
+node_modules/
+goa-dashboard/dist/
+goa-dashboard/*.tsbuildinfo
+
+# SQLite-backed demo state (default GOA_DATABASE_URL=sqlite:./goa.db). WAL
+# and shared-memory sidecars are written next to the main db.
+goa.db
+goa.db-wal
+goa.db-shm

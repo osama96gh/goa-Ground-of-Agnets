@@ -1,6 +1,6 @@
 """Persistence Protocols — the pluggable storage surface.
 
-Three Protocols, each backed by an `InMemory*` default in
+Four Protocols, each backed by an `InMemory*` default in
 [goa.repos.memory](memory.py) and swappable at `create_app(...)` time:
 
 - `ParticipantStore` — the participant registry. Plain CRUD + discovery.
@@ -11,10 +11,17 @@ Three Protocols, each backed by an `InMemory*` default in
   the task's existence all need to be consistent on a single transaction
   boundary).
 - `BlobStore` — attachment bytes referenced by `Content.attachments`.
+- `MemoryStore` — agent-private, cross-task key→document memory.
 
 Consumers can implement any of these against Postgres, SQLite, S3, etc.
 Every method does one logical write (or one logical read); no consumer
 ever has to reason about cross-store transactions.
+
+Method names are globally unique across the Protocols on purpose: one
+adapter object (e.g. `SqliteAdapter`) implements several of them at once,
+so `BlobStore` uses `get_meta`/`get_task_id` (not `get`/`put`) and
+`MemoryStore` suffixes everything `_memory` (`put_memory`, `get_memory`,
+…) to avoid colliding with `ParticipantStore.get` / `BlobStore.put`.
 """
 
 from __future__ import annotations
@@ -25,7 +32,7 @@ from datetime import datetime
 from typing import Protocol
 from uuid import UUID
 
-from goa.domain.models import Attachment, Event, Participant, Task
+from goa.domain.models import Attachment, Event, MemoryEntry, Participant, Task
 
 
 class ParticipantStore(Protocol):
@@ -263,3 +270,71 @@ class BlobStore(Protocol):
         a single read of this value."""
         ...
     async def open(self, blob_id: UUID) -> AsyncIterator[bytes]: ...
+
+
+class MemoryStore(Protocol):
+    """Agent-private, cross-task key→document memory.
+
+    Owner-scoped: every entry belongs to exactly one participant
+    (`owner_id`), and authz is a single-column check (`owner_id ==
+    caller`). Unlike the task-bound `BlobStore`, memory deliberately
+    spans tasks — but it never crosses the task-boundary seal (§7),
+    because a participant only ever reads entries it wrote.
+
+    Each method does one logical write or read; no cross-store
+    transactions. Backends enforce `UNIQUE(owner_id, key)`.
+    """
+
+    async def put_memory(
+        self, entry: MemoryEntry, *, max_entry_bytes: int, max_entries: int,
+    ) -> tuple[MemoryEntry, bool]:
+        """Upsert on `(owner_id, key)`. Overwrites `value`/`tags` and bumps
+        `updated_at`, **preserving the original `created_at`**. Returns
+        `(stored_entry, created)` where `created` is True only when the key
+        did not previously exist (drives the 201-vs-200 status, mirroring
+        `POST /tasks/upsert`).
+
+        Raises `MemoryEntryTooLarge` when the JSON-encoded `value` exceeds
+        `max_entry_bytes`, and `MemoryQuotaExceeded` when storing a **new**
+        key would push the owner past `max_entries` (overwriting an existing
+        key is always allowed). Both caps are passed in by the caller — the
+        same pattern as `BlobStore.put(..., max_bytes=...)` — so the store
+        owns no config."""
+        ...
+
+    async def get_memory(self, owner_id: UUID, key: str) -> MemoryEntry | None: ...
+
+    async def list_memory(
+        self,
+        owner_id: UUID,
+        *,
+        key_prefix: str | None = None,
+        tags: list[str] | None = None,
+    ) -> list[MemoryEntry]:
+        """Owner-scoped listing, ordered by `key`. `key_prefix` filters via
+        an index-friendly range scan (`key >= prefix AND key < prefix_upper`),
+        **not** SQL `LIKE` — so `_`/`%` in keys are literal, not wildcards.
+        `tags` is AND-ed (an entry must carry every tag), mirroring
+        `ParticipantStore.search(capabilities=...)`."""
+        ...
+
+    async def delete_memory(self, owner_id: UUID, key: str) -> int:
+        """Delete one entry by exact key. Idempotent — returns 1 if a row
+        was removed, 0 if the key was absent."""
+        ...
+
+    async def purge_memory(self, owner_id: UUID, *, key_prefix: str) -> int:
+        """Forget-by-prefix (same range scan as `list_memory`). Returns the
+        number of entries removed. `key_prefix` is required and non-empty —
+        a full-owner wipe is intentionally not expressible here (deleting the
+        participant is the account-wipe path)."""
+        ...
+
+    async def purge_owner(self, owner_id: UUID) -> int:
+        """Release **all** of an owner's memory — the account-wipe path
+        referenced by `purge_memory`'s docstring. Called when a participant
+        is deleted (§9: "a participant's entire memory is released when the
+        participant is deleted"); there are no foreign keys on `owner_id`, so
+        this cleanup is explicit rather than a cascade. Idempotent — returns
+        the number of entries removed (0 if the owner had none)."""
+        ...

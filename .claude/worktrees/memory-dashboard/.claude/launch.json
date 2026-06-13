@@ -1,0 +1,45 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "goa-hub",
+      "runtimeExecutable": "/Users/osamaghazal/Development/Projects/goa-God-of-Agnets/.venv/bin/uvicorn",
+      "runtimeArgs": [
+        "goa.main:app",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "8766",
+        "--log-level",
+        "warning"
+      ],
+      "env": {
+        "GOA_SERVER_PEPPER": "dev-pepper",
+        "GOA_ADMIN_TOKEN": "dev-admin-token",
+        "PYTHONPATH": "/Users/osamaghazal/Development/Projects/goa-God-of-Agnets/goa-core/src"
+      },
+      "port": 8766
+    },
+    {
+      "name": "goa-dashboard",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev", "--", "--port", "5173", "--strictPort"],
+      "cwd": "/Users/osamaghazal/Development/Projects/goa-God-of-Agnets/goa-dashboard",
+      "port": 5173
+    },
+    {
+      "name": "chat-service",
+      "runtimeExecutable": "/Users/osamaghazal/Development/Projects/goa-God-of-Agnets/.venv/bin/python",
+      "runtimeArgs": [
+        "examples/chat-service/main.py",
+        "--host", "127.0.0.1",
+        "--port", "8002"
+      ],
+      "cwd": "/Users/osamaghazal/Development/Projects/goa-God-of-Agnets",
+      "env": {
+        "GOA_BASE_URL": "http://127.0.0.1:8766"
+      },
+      "port": 8002
+    }
+  ]
+}

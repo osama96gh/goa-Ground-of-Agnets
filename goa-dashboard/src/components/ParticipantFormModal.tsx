@@ -1,12 +1,29 @@
 import { useState } from "react";
-import type { Participant, ParticipantType } from "../lib/types";
+import type { Participant, ParticipantType } from "@/lib/types";
+import { createAdminParticipant, updateAdminParticipant } from "@/api/admin";
+import { friendlyError } from "@/lib/errors";
 import {
-  createAdminParticipant,
-  updateAdminParticipant,
-} from "../api/admin";
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 
 type Props = {
-  onClose: () => void;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
   onSuccess: (result: { participant: Participant; api_key?: string }) => void;
 } & (
   | { mode: "add"; initialValues?: undefined }
@@ -14,7 +31,7 @@ type Props = {
 );
 
 export function ParticipantFormModal(props: Props) {
-  const { mode, onClose, onSuccess } = props;
+  const { mode, open, onOpenChange, onSuccess } = props;
   const [name, setName] = useState(props.initialValues?.name ?? "");
   const [type, setType] = useState<ParticipantType>(
     props.initialValues?.type ?? "agent",
@@ -43,7 +60,6 @@ export function ParticipantFormModal(props: Props) {
         });
         onSuccess({ participant: res.participant, api_key: res.api_key });
       } else {
-        // Discriminated union narrows initialValues to Participant here.
         const updated = await updateAdminParticipant(props.initialValues.id, {
           name,
           description,
@@ -51,92 +67,96 @@ export function ParticipantFormModal(props: Props) {
         });
         onSuccess({ participant: updated });
       }
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Request failed");
+    } catch (err) {
+      setError(friendlyError(err));
     } finally {
       setLoading(false);
     }
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-      <div className="w-full max-w-md rounded-lg border border-slate-200 bg-white p-6 shadow-lg">
-        <h2 className="mb-4 text-lg font-semibold">
-          {mode === "add" ? "Add participant" : "Edit participant"}
-        </h2>
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>
+            {mode === "add" ? "Add participant" : "Edit participant"}
+          </DialogTitle>
+          <DialogDescription>
+            {mode === "add"
+              ? "Register a new agent or service. The API key is shown once on creation."
+              : "Update this participant's details. Type is immutable."}
+          </DialogDescription>
+        </DialogHeader>
         <form onSubmit={handleSubmit} className="space-y-4">
-          <label className="block">
-            <span className="text-xs font-medium text-slate-600">Name</span>
-            <input
-              type="text"
+          <div className="space-y-1.5">
+            <Label htmlFor="p-name">Name</Label>
+            <Input
+              id="p-name"
               value={name}
               onChange={(e) => setName(e.target.value)}
               required
               minLength={1}
-              className="mt-1 block w-full rounded border border-slate-300 px-2 py-1.5 text-sm"
             />
-          </label>
-          <label className="block">
-            <span className="text-xs font-medium text-slate-600">Type</span>
-            <select
+          </div>
+          <div className="space-y-1.5">
+            <Label>Type</Label>
+            <Select
               value={type}
-              onChange={(e) => setType(e.target.value as ParticipantType)}
+              onValueChange={(v) => setType(v as ParticipantType)}
               disabled={mode === "edit"}
-              className="mt-1 block w-full rounded border border-slate-300 px-2 py-1.5 text-sm disabled:bg-slate-50 disabled:text-slate-400"
             >
-              <option value="agent">agent</option>
-              <option value="service">service</option>
-            </select>
-          </label>
-          <label className="block">
-            <span className="text-xs font-medium text-slate-600">
-              Description
-            </span>
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="agent">agent</SelectItem>
+                <SelectItem value="service">service</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="p-desc">Description</Label>
             <textarea
+              id="p-desc"
               value={description}
               onChange={(e) => setDescription(e.target.value)}
               rows={2}
-              className="mt-1 block w-full rounded border border-slate-300 px-2 py-1.5 text-sm"
+              className="flex w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
             />
-          </label>
-          <label className="block">
-            <span className="text-xs font-medium text-slate-600">
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="p-caps">
               Capabilities{" "}
-              <span className="font-normal text-slate-400">
+              <span className="font-normal text-muted-foreground">
                 (space-separated)
               </span>
-            </span>
-            <input
-              type="text"
+            </Label>
+            <Input
+              id="p-caps"
               value={capabilities}
               onChange={(e) => setCapabilities(e.target.value)}
               placeholder="payments support"
-              className="mt-1 block w-full rounded border border-slate-300 px-2 py-1.5 text-sm"
             />
-          </label>
+          </div>
           {error && (
-            <p className="rounded bg-red-50 px-3 py-2 text-xs text-red-700">
+            <p className="rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">
               {error}
             </p>
           )}
-          <div className="flex justify-end gap-2 pt-1">
-            <button
+          <DialogFooter>
+            <Button
               type="button"
-              onClick={onClose}
-              className="rounded border border-slate-300 px-3 py-1.5 text-sm text-slate-600 hover:bg-slate-50"
+              variant="outline"
+              onClick={() => onOpenChange(false)}
             >
               Cancel
-            </button>
-            <button
-              type="submit"
-              disabled={loading}
-              className="rounded bg-slate-800 px-3 py-1.5 text-sm text-white hover:bg-slate-700 disabled:opacity-50"
-            >
+            </Button>
+            <Button type="submit" disabled={loading}>
               {loading ? "Saving…" : mode === "add" ? "Create" : "Save"}
-            </button>
-          </div>
+            </Button>
+          </DialogFooter>
         </form>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 }

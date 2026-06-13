@@ -21,10 +21,13 @@ export type PendingPair = [string, string]; // [question_event_id, target_id]
 // it from `GetTaskResponse.pending_questions` (detail endpoint) or
 // `TaskListItem.pending_questions` (list endpoints).
 // `TaskSummary.pending_questions` still rides on SSE stream frames.
+export type TaskStatus = "open" | "closed";
+
 export interface Task {
   id: string;
   initiator_id: string;
   parent_task_id: string | null;
+  status: TaskStatus;
   participants: string[];
   subject: string;
   external_ref: string | null;
@@ -162,4 +165,52 @@ export interface AdminUpdateParticipantBody {
   name?: string;
   description?: string;
   capabilities?: string[];
+}
+
+// Keyset-paginated admin task list — `GET /admin/tasks`.
+export interface TaskPage {
+  tasks: TaskListItem[];
+  next_cursor: string | null;
+}
+
+// Aggregate metrics — `GET /admin/stats`.
+export interface AdminStats {
+  totals: {
+    tasks: number;
+    tasks_open: number;
+    tasks_closed: number;
+    participants: number;
+    participants_agent: number;
+    participants_service: number;
+    pending_questions: number;
+    events_total: number;
+  };
+  events_today: number;
+  event_volume: { date: string; count: number }[];
+  tasks_by_status: { open: number; closed: number };
+  recent_activity: {
+    task_id: string;
+    subject: string;
+    status: TaskStatus;
+    last_activity_at: string;
+    pending_count: number;
+  }[];
+  pending_backlog: {
+    task_id: string;
+    subject: string;
+    pending_count: number;
+    oldest_pending_at: string | null;
+  }[];
+}
+
+// Agent-private memory entry (§9). Owner-scoped; the dashboard reads it
+// per-participant via the admin token (read-only).
+export interface MemoryEntry {
+  id: string;
+  owner_id: string;
+  key: string;
+  value: unknown; // any JSON value
+  tags: string[];
+  created_at: string;
+  updated_at: string;
 }

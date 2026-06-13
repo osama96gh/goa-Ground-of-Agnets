@@ -269,7 +269,23 @@ class TaskService:
             raise TaskNotFound()
         if caller.id != task.initiator_id:
             raise ForbiddenRole()
+        return await self._close_task(task)
 
+    async def admin_close_task(self, task_id: UUID) -> Task:
+        """Operator close — same lifecycle as `close_task` (status flip,
+        external_ref release, `parent_closed` fan-out, idempotency) but
+        **without** the initiator role check. Backs `POST /admin/tasks/{id}/close`,
+        where the deployment admin token already grants authority to act on
+        any task. Event writes still preserve the §6.3 `from` invariant —
+        `parent_closed` is a system event (`from_=None`), so no impersonation.
+        """
+        task = await self._log.get_task(task_id)
+        if task is None:
+            raise TaskNotFound()
+        return await self._close_task(task)
+
+    async def _close_task(self, task: Task) -> Task:
+        # Shared close mechanics for the initiator and admin entry points.
         # Snapshot children *before* the parent lock. We don't need a
         # frozen view — a child created concurrently with this close
         # will observe the parent's `status='closed'` via `GET /tasks/{id}`
